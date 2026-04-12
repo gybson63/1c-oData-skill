@@ -26,14 +26,16 @@ Credentials хранятся в файле `env.json` (вне репозитор
 
 ## Подготовка переменных
 
-Перед выполнением запросов загрузите переменные из `env.json`:
+Перед выполнением запросов загрузите переменные из `env.json` через Node.js:
 
 ```bash
-ODATA_URL=$(python -c "import json; d=json.load(open('env.json', encoding='utf-8')); print(d['default']['odata_url'])")
-ODATA_AUTH=$(python -c "import base64,json; d=json.load(open('env.json', encoding='utf-8')); u=d['default']['odata_user']; p=d['default']['odata_password']; print(base64.b64encode(f'{u}:{p}'.encode()).decode())")
+ODATA_URL=$(node -e "const d=require('./env.json').default; process.stdout.write(d.odata_url)")
+
+ODATA_AUTH=$(node -e "const d=require('./env.json').default; process.stdout.write(Buffer.from(d.odata_user+':'+d.odata_password).toString('base64'))")
 ```
 
 > **Важно:** `curl -u "user:pass"` не работает с кириллицей на Windows — используй только заголовок `Authorization: Basic`.
+> PowerShell не подходит для base64-кодирования кириллических паролей — ломает кодировку.
 
 ## Проверить доступные сущности
 

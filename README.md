@@ -23,16 +23,19 @@ Credentials хранятся в `env.json` (не в git):
 Загрузить переменные и выполнить запрос:
 
 ```bash
-ODATA_URL=$(python -c "import json; d=json.load(open('env.json', encoding='utf-8')); print(d['default']['odata_url'])")
-ODATA_AUTH=$(python -c "import base64,json; d=json.load(open('env.json', encoding='utf-8')); u=d['default']['odata_user']; p=d['default']['odata_password']; print(base64.b64encode(f'{u}:{p}'.encode()).decode())")
+ODATA_URL=$(node -e "const d=require('./env.json').default; process.stdout.write(d.odata_url)")
 
-# Получить данные справочника
-ENCODED=$(python -c "from urllib.parse import quote; print(quote('Контрагенты'))")
+ODATA_AUTH=$(node -e "const d=require('./env.json').default; process.stdout.write(Buffer.from(d.odata_user+':'+d.odata_password).toString('base64'))")
+
+# URL-кодирование кириллицы
+ENCODED=$(node -e "process.stdout.write(encodeURIComponent('Контрагенты'))")
+
 curl -s -H "Authorization: Basic $ODATA_AUTH" -H "Accept: application/json" \
   "$ODATA_URL/Catalog_${ENCODED}?\$top=10&\$format=json"
 ```
 
 > **Важно:** `curl -u "user:pass"` не работает с кириллицей на Windows — используй только заголовок `Authorization: Basic`.
+> PowerShell не подходит — ломает base64 при кириллических паролях.
 
 ### Типы объектов в URL
 
@@ -119,5 +122,5 @@ env.example.json                  — пример credentials
 
 - 1С:Предприятие 8.3.6+
 - База опубликована на веб-сервере с включённым OData
-- Python 3 (для формирования заголовка Authorization)
-- PowerShell (для сборки EPF)
+- Node.js (для чтения env.json и кодирования запросов)
+- PowerShell (встроен в Windows — для сборки EPF)
