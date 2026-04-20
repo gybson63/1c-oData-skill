@@ -1,140 +1,186 @@
 ---
 name: 1cconfinfo
-description: Анализ структуры конфигурации 1С:Предприятие по XML-файлам выгрузки
+description: Анализ структуры конфигурации 1С:Предприятие — по XML-файлам выгрузки или через OData $metadata. Если Configuration.xml недоступен, автоматически использует OData.
 ---
 
 # 1cconfinfo — анализ конфигурации 1С
 
 ## Описание
 
-Скилл для анализа структуры конфигурации 1С:Предприятие, выгруженной в формате XML
-(через Конфигуратор → «Выгрузить конфигурацию в файлы» или `ibcmd`).
+Скилл для анализа структуры конфигурации 1С:Предприятие.  
+Поддерживает два источника данных:
 
-## Структура выгрузки конфигурации
+| Источник | Когда использовать |
+|----------|-------------------|
+| **XML-выгрузка** (`Configuration.xml`) | Есть выгрузка конфигурации в файлы |
+| **OData `$metadata`** | Нет выгрузки, но есть опубликованная база |
 
-### Корневой файл
+**Приоритет**: сначала ищи `Configuration.xml`. Если файла нет — используй OData.
 
-`Configuration.xml` — корневой дескриптор метаданных. Содержит:
-- имя, версию, поставщика конфигурации
+---
+
+## Источник 1: XML-выгрузка конфигурации
+
+Используй скилл `cf-info` для анализа XML-выгрузки:
+
+```powershell
+python .claude/skills/cf-info/scripts/cf-info.py -ConfigPath <путь_к_Configuration.xml_или_папке>
+```
+
+Или через PowerShell:
+
+```powershell
+powershell -NoProfile -File .claude/skills/cf-info/scripts/cf-info.ps1 -ConfigPath <путь>
+```
+
+Режимы: `overview` (default), `brief`, `full`.
+
+### Структура выгрузки
+
+`Configuration.xml` — корневой дескриптор метаданных:
+- имя, версию, поставщика
 - ссылки на все объекты конфигурации
 
-### Типы объектов и папки
+| Тип объекта | Папка |
+|-------------|-------|
+| Справочники | `Catalogs/` |
+| Документы | `Documents/` |
+| РегистрыСведений | `InformationRegisters/` |
+| РегистрыНакопления | `AccumulationRegisters/` |
+| Перечисления | `Enums/` |
+| Отчёты | `Reports/` |
+| Обработки | `DataProcessors/` |
+| ОбщиеМодули | `CommonModules/` |
+| Роли | `Roles/` |
+| Подсистемы | `Subsystems/` |
+| РегламентныеЗадания | `ScheduledJobs/` |
+| ПланыОбмена | `ExchangePlans/` |
+| HTTPСервисы | `HTTPServices/` |
 
-| Тип объекта | Папка | Описание |
-|-------------|-------|----------|
-| Справочники | `Catalogs/` | Нормативно-справочная информация |
-| Документы | `Documents/` | Хозяйственные операции |
-| РегистрыСведений | `InformationRegisters/` | Хранение состояний |
-| РегистрыНакопления | `AccumulationRegisters/` | Обороты и остатки |
-| РегистрыРасчета | `CalculationRegisters/` | Расчётные данные |
-| ПланыВидовРасчета | `ChartsOfCalculationTypes/` | Виды расчётов |
-| ПланыВидовХарактеристик | `ChartsOfCharacteristicTypes/` | Виды характеристик |
-| Перечисления | `Enums/` | Фиксированные наборы значений |
-| Отчёты | `Reports/` | Отчёты |
-| Обработки | `DataProcessors/` | Обработки данных |
-| ОбщиеМодули | `CommonModules/` | Общие модули |
-| ОбщиеФормы | `CommonForms/` | Общие формы |
-| Константы | `Constants/` | Константы |
-| Роли | `Roles/` | Права доступа |
-| Подсистемы | `Subsystems/` | Подсистемы |
-| РегламентныеЗадания | `ScheduledJobs/` | Регламентные задания |
-| ПланыОбмена | `ExchangePlans/` | Планы обмена |
-| HTTPСервисы | `HTTPServices/` | HTTP-сервисы |
-| ВебСервисы | `WebServices/` | Веб-сервисы |
+---
 
-## Структура файла объекта
+## Источник 2: OData $metadata (когда нет Configuration.xml)
+
+Если выгрузки нет, используй скрипт `odata-cfg-info.py`:
+
+```bash
+python skills/1cconfinfo/scripts/odata-cfg-info.py [-Mode overview|brief|full]
+```
+
+Скрипт читает credentials из `env.json`, запрашивает `{odata_url}/$metadata`, **кэширует** ответ в `.cache/` и показывает состав опубликованных объектов.
+
+### Параметры скрипта
+
+| Параметр | Описание | По умолчанию |
+|----------|----------|--------------|
+| `-Mode` | overview / brief / full | overview |
+| `-EnvFile` | Путь к env.json | `env.json` |
+| `-EnvProfile` | Профиль в env.json | `default` |
+| `-ODataUrl` | Переопределить URL | из env.json |
+| `-CacheDir` | Папка для кэша | `.cache` |
+| `-CacheTTL` | Время жизни кэша (сек) | 3600 |
+| `-ForceRefresh` | Игнорировать кэш | false |
+
+### Примеры
+
+```bash
+# Обзор (из кэша если есть, иначе — из OData)
+python skills/1cconfinfo/scripts/odata-cfg-info.py
+
+# Полный список объектов
+python skills/1cconfinfo/scripts/odata-cfg-info.py -Mode full
+
+# Принудительно обновить кэш
+python skills/1cconfinfo/scripts/odata-cfg-info.py -ForceRefresh
+
+# Краткая строка
+python skills/1cconfinfo/scripts/odata-cfg-info.py -Mode brief
+
+# Другой профиль
+python skills/1cconfinfo/scripts/odata-cfg-info.py -EnvProfile prod
+```
+
+### Как работает кэш
+
+- Файл кэша: `.cache/odata_metadata_<hash>.xml` (hash от URL базы)
+- TTL по умолчанию: **1 час** (3600 сек)
+- Повторные вызовы в течение часа работают без сетевых запросов
+- `-ForceRefresh` принудительно обновляет кэш
+
+### Ограничения OData vs XML
+
+| Возможность | XML-выгрузка | OData |
+|-------------|:---:|:---:|
+| Все объекты конфигурации | ✓ | ✗ (только опубликованные) |
+| Реквизиты объектов | ✓ | ✓ (через EntityType) |
+| Версия конфигурации | ✓ | ✗ |
+| Роли, подсистемы, модули | ✓ | ✗ |
+| Работает без выгрузки | ✗ | ✓ |
+
+---
+
+## Настройка env.json
+
+```json
+{
+  "default": {
+    "odata_url": "http://localhost/your_base/odata/standard.odata",
+    "odata_user": "Администратор",
+    "odata_password": "пароль"
+  }
+}
+```
+
+> **Важно:** Для кириллических паролей используй только этот скрипт.  
+> `curl -u` и PowerShell ломают кодировку при base64.
+
+---
+
+## Алгоритм выбора источника
+
+```
+1. Есть ли Configuration.xml (или папка с ним)?
+   ДА → использовать cf-info (полная информация)
+   НЕТ → перейти к п.2
+
+2. Есть ли env.json с odata_url?
+   ДА → использовать odata-cfg-info.py (опубликованные объекты)
+   НЕТ → попросить пользователя указать путь к выгрузке или настроить env.json
+```
+
+---
+
+## Структура файла объекта (XML-выгрузка)
 
 ```xml
-<?xml version="1.0" encoding="UTF-8"?>
 <MetaDataObject xmlns="..." version="2.20">
   <Catalog uuid="...">
     <Properties>
       <Name>ИмяОбъекта</Name>
-      <Synonym>
-        <v8:item>
-          <v8:lang>ru</v8:lang>
-          <v8:content>Синоним для отображения</v8:content>
-        </v8:item>
-      </Synonym>
+      <Synonym><v8:item><v8:content>Синоним</v8:content></v8:item></Synonym>
     </Properties>
     <ChildObjects>
-      <!-- Реквизиты, Табличные части, Формы -->
       <Attribute uuid="...">
         <Properties>
           <Name>ИмяРеквизита</Name>
-          <Type>
-            <v8:Type>cfg:CatalogRef.ДругойСправочник</v8:Type>
-          </Type>
+          <Type><v8:Type>cfg:CatalogRef.ДругойСправочник</v8:Type></Type>
         </Properties>
       </Attribute>
-      <TabularSection uuid="...">
-        <Properties>
-          <Name>ИмяТаблЧасти</Name>
-        </Properties>
-        <ChildObjects>
-          <Attribute uuid="...">...</Attribute>
-        </ChildObjects>
-      </TabularSection>
     </ChildObjects>
   </Catalog>
 </MetaDataObject>
 ```
 
-## Структура папки объекта
-
-```
-Catalogs/
-  ИмяСправочника.xml          # Основное определение
-  ИмяСправочника/
-    Ext/
-      ManagerModule.bsl       # Модуль менеджера
-      ObjectModule.bsl        # Модуль объекта
-    Forms/
-      ФормаЭлемента.xml       # Определение формы
-      ФормаЭлемента/
-        Ext/
-          Form.xml            # Структура формы
-          Form/
-            Module.bsl        # Модуль формы
-```
-
-## Как найти реквизиты объекта
-
-1. Открыть `Catalogs/ИмяСправочника.xml`
-2. Найти секцию `<ChildObjects>`
-3. Перечислить все `<Attribute>` — это реквизиты
-4. Перечислить все `<TabularSection>` — это табличные части
-
 ## Типы ссылок в реквизитах
 
 ```xml
-<!-- Ссылка на справочник -->
 <v8:Type>cfg:CatalogRef.ИмяСправочника</v8:Type>
-
-<!-- Ссылка на документ -->
 <v8:Type>cfg:DocumentRef.ИмяДокумента</v8:Type>
-
-<!-- Ссылка на перечисление -->
 <v8:Type>cfg:EnumRef.ИмяПеречисления</v8:Type>
-
-<!-- Примитивные типы -->
 <v8:Type>xsd:string</v8:Type>
 <v8:Type>xsd:decimal</v8:Type>
 <v8:Type>xsd:boolean</v8:Type>
 <v8:Type>xsd:dateTime</v8:Type>
-```
-
-## Поиск по конфигурации
-
-```bash
-# Найти все объекты, ссылающиеся на справочник
-grep -r "CatalogRef.ИмяСправочника" cf/
-
-# Найти все формы объекта
-find cf/Catalogs/ИмяСправочника/Forms -name "*.xml"
-
-# Найти объект по части имени
-find cf/ -name "*ИмяЧасть*"
 ```
 
 ## Соглашения об именовании
@@ -143,26 +189,5 @@ find cf/ -name "*ИмяЧасть*"
 |---------|--------|----------|
 | `ПрисоединенныеФайлы` суффикс | `СотрудникиПрисоединенныеФайлы` | Каталог прикреплённых файлов |
 | `бит_` префикс | `бит_Доверенность` | Кастомный объект доработки |
-| `Удалить` префикс | `УдалитьБанки` | Устаревший объект, помечен к удалению |
+| `Удалить` префикс | `УдалитьБанки` | Устаревший объект |
 | `адаптер_` префикс | `адаптер_ВходящиеСообщения` | Объект интеграционного адаптера |
-
-## Пример: анализ справочника Сотрудники
-
-**Файл**: `Catalogs/Сотрудники.xml`
-
-**Ключевые реквизиты:**
-- `ФизическоеЛицо` — ссылка на `Catalog_ФизическиеЛица`
-- `ГоловнойСотрудник` — ссылка на самого себя (Catalog_Сотрудники)
-- `ГоловнаяОрганизация` — ссылка на `Catalog_Организации`
-
-**Табличные части:**
-- `ДополнительныеРеквизиты`
-- `КонтактнаяИнформация`
-
-**Формы:**
-- `ФормаЭлемента`, `ФормаСписка`, `ЛичныеДанные`, `НачисленияИУдержания`
-
-## Полезные ссылки
-
-- Документация 1С: https://its.1c.ru/db/v8std
-- Руководство разработчика: https://its.1c.ru/db/metod8dev
