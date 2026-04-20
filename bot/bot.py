@@ -522,22 +522,43 @@ async def execute_odata_query(odata_url: str, auth_header: dict,
 async def execute_odata_count(
     odata_url: str, auth_header: dict, entity: str, filter_expr: Optional[str]
 ) -> int:
-    """Hit /<entity>/$count and return the integer result."""
+    """Return the count of records for entity. Tries /$count first, falls back to $inlinecount=allpages."""
     loop = asyncio.get_event_loop()
+
+    # Attempt 1: /<entity>/$count
     url = build_odata_count_url(odata_url, entity, filter_expr)
     log.info("OData COUNT GET: %s", url)
-    raw = await loop.run_in_executor(None, _sync_http_get, url, auth_header)
-    text = raw.decode("utf-8").strip().strip('"')
     try:
-        return int(text)
-    except ValueError:
+        raw = await loop.run_in_executor(None, _sync_http_get, url, auth_header)
+        text = raw.decode("utf-8").strip().strip('"')
         try:
+            return int(text)
+        except ValueError:
             parsed = json.loads(raw.decode("utf-8"))
             if isinstance(parsed, int):
                 return parsed
             return int(parsed.get("value", 0))
-        except Exception:
-            raise ODataError(f"Неожиданный ответ от /$count: {text[:100]}", status_code=0)
+    except ODataError as e:
+        if e.status_code not in (404, 400):
+            raise
+        log.warning("/$count вернул %d, пробуем $inlinecount=allpages", e.status_code)
+
+    # Attempt 2: $inlinecount=allpages (OData v3)
+    params = ["$top=1", "$format=json", "$inlinecount=allpages"]
+    if filter_expr:
+        fval = _strip_prefix(filter_expr, "$filter=")
+        params.append("$filter=" + _qv(fval, safe="(),'/"))
+    encoded_entity = _qv(entity)
+    url2 = f"{odata_url.rstrip('/')}/{encoded_entity}?{'&'.join(params)}"
+    log.info("OData INLINECOUNT GET: %s", url2)
+    raw2 = await loop.run_in_executor(None, _sync_http_get, url2, auth_header)
+    data = json.loads(raw2.decode("utf-8"))
+    # 1С OData v3 возвращает "odata.count" или "__count" (строка)
+    for key in ("odata.count", "__count", "odata.totalCount"):
+        if key in data:
+            return int(data[key])
+    # Последний резерв: посчитать по value (если $top=1 вернул 1 запись, count неизвестен)
+    raise ODataError("Не удалось получить количество записей: сервер не вернул odata.count", status_code=0)
 
 
 # ---------------------------------------------------------------------------
@@ -733,6 +754,8 @@ async def ai_build_query(client: AsyncOpenAI, model: str,
 
     for meta_idx, meta in enumerate(meta_levels):
         system = STEP1_SYSTEM.format(metadata=meta)
+        if _config_hint:
+            system = system + "\n\nОсобенности конфигурации:\n" + _config_hint
         # Offer tools only when metadata is not severely truncated (tool calls add token overhead)
         use_tools = (meta_idx == 0)
         tools_arg = STEP1_TOOLS if use_tools else None
@@ -839,6 +862,8 @@ _env_file: str = "env.json"
 _cache_dir: str = ".cache"
 _master_prompt: str = STEP2_SYSTEM
 _master_prompt_file: Path = Path(__file__).parent / "master_prompt.md"
+_config_hint: str = ""
+_config_hint_file: Path = Path(__file__).parent / "config_hint.md"
 
 # Conversation history per chat: chat_id → [{"role": ..., "content": ...}, ...]
 _history: dict[int, list[dict]] = {}
@@ -854,9 +879,18 @@ def load_master_prompt() -> str:
     return STEP2_SYSTEM
 
 
+def load_config_hint() -> str:
+    if _config_hint_file.exists():
+        text = _config_hint_file.read_text(encoding="utf-8").strip()
+        log.info("Подсказки конфигурации загружены из %s (%d символов)", _config_hint_file, len(text))
+        return text
+    return ""
+
+
 async def _load_metadata(force: bool = False) -> None:
-    global _metadata_cache, _metadata_text, _master_prompt
+    global _metadata_cache, _metadata_text, _master_prompt, _config_hint
     _master_prompt = load_master_prompt()
+    _config_hint = load_config_hint()
     loop = asyncio.get_event_loop()
     meta = await loop.run_in_executor(
         None, get_metadata_summary, _env_file, _cache_dir, force
