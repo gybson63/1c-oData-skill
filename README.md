@@ -91,6 +91,25 @@ powershell.exe -NoProfile -File .claude/skills/epf-build/scripts/epf-build.ps1 `
 
 ---
 
+## Telegram-бот для запросов к 1С
+
+Бот принимает вопросы на русском языке и возвращает данные из базы 1С — без написания запросов вручную.
+
+Подробное описание, настройка и конфигурация — в [`bot/README.md`](bot/README.md).
+
+### Быстрый запуск
+
+```bash
+pip install python-telegram-bot openai
+
+# Добавить в env.json поля telegram_token, ai_api_key, ai_base_url, ai_model
+# (odata_url, odata_user, odata_password уже должны быть)
+
+python bot/bot.py
+```
+
+---
+
 ## Документация
 
 | Файл | Описание |
@@ -105,6 +124,10 @@ powershell.exe -NoProfile -File .claude/skills/epf-build/scripts/epf-build.ps1 `
 ## Структура проекта
 
 ```
+bot/
+  bot.py              — Telegram-бот
+  master_prompt.md    — промпт форматирования ответов
+  README.md           — описание бота
 skills/
   odata/              — скилл OData-запросов
   1cconfinfo/         — скилл анализа конфигурации
