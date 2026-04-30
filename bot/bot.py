@@ -12,10 +12,8 @@ import re
 import subprocess
 import sys
 import time
-import urllib.error
 import urllib.parse
 from xml.etree import ElementTree as ET
-import urllib.request
 from pathlib import Path
 from typing import Optional
 
@@ -24,6 +22,8 @@ from html import escape as _html_escape
 from openai import AsyncOpenAI
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
+
+from mcp_client import MCPClientManager, MCPToolError
 
 
 def _esc(text: str) -> str:
@@ -462,32 +462,50 @@ def _sanitize_url(url: str) -> str:
     return url
 
 
-def _sync_http_get(url: str, headers: dict) -> bytes:
+_mcp_manager: Optional[MCPClientManager] = None
+
+
+async def _do_http_get(url: str, headers: dict) -> bytes:
+    """Execute HTTP GET via MCP fetch tool. Raises ODataError on failure."""
+    global _mcp_manager
+
+    if _mcp_manager is None or not _mcp_manager.is_connected():
+        raise ODataError("MCP-сервер 1c-odata не подключён. Проверьте конфигурацию mcp_servers в env.json.", status_code=0)
+
     url = _sanitize_url(url)
-    req = urllib.request.Request(url, headers=headers)
+
+    fetch_headers = dict(headers)
+    fetch_headers.setdefault("Accept", "application/json")
+
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return resp.read()
-    except urllib.error.HTTPError as e:
-        body = ""
-        try:
-            body = e.read().decode("utf-8", errors="ignore")[:300]
-        except Exception:
-            pass
-        raise ODataError(f"HTTP {e.code}: {e.reason} | {body}", status_code=e.code)
-    except urllib.error.URLError as e:
-        raise ODataError(f"Ошибка соединения: {e.reason}", status_code=0)
+        body_text = await _mcp_manager.call_tool("fetch", {
+            "url": url,
+            "method": "GET",
+            "headers": fetch_headers,
+        })
+    except MCPToolError as e:
+        log.error("MCP fetch error: %s | %s", e, e.details[:300] if e.details else "")
+        # Extract HTTP status from error message (format: "HTTP 404: ...")
+        status = 0
+        status_match = re.search(r"HTTP (\d{3})", e.details or "")
+        if status_match:
+            status = int(status_match.group(1))
+        raise ODataError(e.details or str(e), status_code=status)
+    except Exception as e:
+        log.error("MCP fetch exception: %s", e)
+        raise ODataError(f"Ошибка MCP: {e}", status_code=0)
+
+    return body_text.encode("utf-8")
 
 
 async def execute_odata_query(odata_url: str, auth_header: dict,
                                entity: str, filter_expr: Optional[str],
                                select: Optional[str], orderby: Optional[str],
                                top: int = 20) -> tuple:
-    loop = asyncio.get_event_loop()
     url = build_odata_url(odata_url, entity, filter_expr, select, orderby, top)
     log.info("OData GET: %s", url)
     try:
-        raw = await loop.run_in_executor(None, _sync_http_get, url, auth_header)
+        raw = await _do_http_get(url, auth_header)
     except ODataError as e:
         if e.status_code == 400:
             if select or orderby:
@@ -495,21 +513,21 @@ async def execute_odata_query(odata_url: str, auth_header: dict,
                 url2 = build_odata_url(odata_url, entity, filter_expr, None, None, top)
                 log.info("OData GET (fallback): %s", url2)
                 try:
-                    raw = await loop.run_in_executor(None, _sync_http_get, url2, auth_header)
+                    raw = await _do_http_get(url2, auth_header)
                 except ODataError as e2:
                     if e2.status_code == 400 and filter_expr:
                         # filter тоже невалиден — пробуем без него
                         log.warning("OData 400 снова, повтор без $filter")
                         url3 = build_odata_url(odata_url, entity, None, None, None, top)
                         log.info("OData GET (fallback no filter): %s", url3)
-                        raw = await loop.run_in_executor(None, _sync_http_get, url3, auth_header)
+                        raw = await _do_http_get(url3, auth_header)
                     else:
                         raise e2
             elif filter_expr:
                 log.warning("OData 400 в $filter, повтор без $filter")
                 url2 = build_odata_url(odata_url, entity, None, None, None, top)
                 log.info("OData GET (fallback no filter): %s", url2)
-                raw = await loop.run_in_executor(None, _sync_http_get, url2, auth_header)
+                raw = await _do_http_get(url2, auth_header)
             else:
                 raise
         else:
@@ -523,13 +541,12 @@ async def execute_odata_count(
     odata_url: str, auth_header: dict, entity: str, filter_expr: Optional[str]
 ) -> int:
     """Return the count of records for entity. Tries /$count first, falls back to $inlinecount=allpages."""
-    loop = asyncio.get_event_loop()
 
     # Attempt 1: /<entity>/$count
     url = build_odata_count_url(odata_url, entity, filter_expr)
     log.info("OData COUNT GET: %s", url)
     try:
-        raw = await loop.run_in_executor(None, _sync_http_get, url, auth_header)
+        raw = await _do_http_get(url, auth_header)
         text = raw.decode("utf-8").strip().strip('"')
         try:
             return int(text)
@@ -551,7 +568,7 @@ async def execute_odata_count(
     encoded_entity = _qv(entity)
     url2 = f"{odata_url.rstrip('/')}/{encoded_entity}?{'&'.join(params)}"
     log.info("OData INLINECOUNT GET: %s", url2)
-    raw2 = await loop.run_in_executor(None, _sync_http_get, url2, auth_header)
+    raw2 = await _do_http_get(url2, auth_header)
     data = json.loads(raw2.decode("utf-8"))
     # 1С OData v3 возвращает "odata.count" или "__count" (строка)
     for key in ("odata.count", "__count", "odata.totalCount"):
@@ -1059,11 +1076,44 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 # ---------------------------------------------------------------------------
+# MCP lifecycle hooks (run inside the Telegram app event loop)
+# ---------------------------------------------------------------------------
+
+async def post_init(application) -> None:
+    """Called after the Telegram app is fully initialized.
+    Connects to all configured MCP servers."""
+    global _mcp_manager
+
+    mcp_config = _cfg.get("mcp_servers", {})
+    if not mcp_config:
+        log.warning("MCP: mcp_servers не настроен в env.json — OData-запросы не будут работать")
+        return
+
+    _mcp_manager = MCPClientManager()
+    await _mcp_manager.connect_all(mcp_config)
+
+    if _mcp_manager.is_connected():
+        status = _mcp_manager.get_status()
+        for name, info in status.items():
+            log.info("MCP [%s]: transport=%s, tools=%s", name, info["transport"], info["tools"])
+    else:
+        log.error("MCP: не удалось подключиться ни к одному серверу")
+
+
+async def post_shutdown(application) -> None:
+    """Called when the Telegram app is shutting down. Disconnects MCP servers."""
+    global _mcp_manager
+    if _mcp_manager:
+        await _mcp_manager.disconnect_all()
+        _mcp_manager = None
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    global _cfg, _ai_client, _env_file, _cache_dir
+    global _cfg, _ai_client, _env_file, _cache_dir, _mcp_manager
 
     _ROOT = Path(__file__).parent.parent
     parser = argparse.ArgumentParser(description="1С OData Telegram Bot")
@@ -1085,14 +1135,14 @@ def main() -> None:
     log.info("Rate limiter: %d rpm (интервал %.1fs)", _cfg["ai_rpm"], 60.0 / _cfg["ai_rpm"])
 
     # Load metadata synchronously at startup
-    log.info("Загрузка метаданных 1С...")
+    log.info("Предзагрузка метаданных 1С...")
     try:
         asyncio.run(_load_metadata(force=False))
     except Exception as e:
-        log.error("Не удалось загрузить метаданные при старте: %s", e)
-        log.warning("Бот запускается без метаданных. Используйте /refresh после устранения ошибки.")
+        log.error("Не удалось предзагрузить метаданные при старте: %s", e)
+        log.warning("Бот продолжит работу без метаданных. Используйте /refresh для повторной загрузки после старта.")
 
-    app = ApplicationBuilder().token(_cfg["telegram_token"]).build()
+    app = ApplicationBuilder().token(_cfg["telegram_token"]).post_init(post_init).post_shutdown(post_shutdown).build()
     app.add_handler(CommandHandler("start", handle_start))
     app.add_handler(CommandHandler("refresh", handle_refresh))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))

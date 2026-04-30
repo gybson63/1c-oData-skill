@@ -43,6 +43,14 @@ from typing import Any, Optional
 
 log = logging.getLogger("1c-bot.mcp")
 
+
+class MCPToolError(Exception):
+    """Raised when an MCP tool returns an error response (isError=True)."""
+    def __init__(self, message: str, details: str = ""):
+        super().__init__(message)
+        self.details = details
+
+
 # ---------------------------------------------------------------------------
 # Lazy import — mcp package may not be installed
 # ---------------------------------------------------------------------------
@@ -72,7 +80,6 @@ def _check_mcp_available() -> bool:
 def _mcp_tool_to_openai(tool: Any) -> dict:
     """Convert an MCP Tool object to OpenAI function calling format."""
     schema = tool.inputSchema or {"type": "object", "properties": {}}
-    # Ensure schema has required structure
     if "type" not in schema:
         schema["type"] = "object"
     if "properties" not in schema:
@@ -89,51 +96,120 @@ def _mcp_tool_to_openai(tool: Any) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# MCP Server Connection
+# MCP Server Connection (background-task pattern to avoid anyio scope issues)
 # ---------------------------------------------------------------------------
 
 class MCPServerConnection:
-    """Manages a connection to a single MCP server."""
+    """Manages a connection to a single MCP server.
+
+    The entire connection lifecycle (stdio_client / sse_client context managers)
+    runs inside a dedicated background asyncio Task.  This avoids anyio's
+    «cancel scope entered / exited in different tasks» error because both
+    ``__aenter__`` and ``__aexit__`` happen in the *same* task.
+    """
 
     def __init__(self, name: str, config: dict):
         self.name = name
         self.config = config
         self.transport_type = config.get("transport", "stdio")
         self.session: Any = None
-        self._read_stream: Any = None
-        self._write_stream: Any = None
-        self._process: Any = None
-        self._cleanup_cm: Any = None
         self._tools_cache: list[Any] = []
         self._openai_tools: list[dict] = []
 
+        # Background task that owns the connection context managers
+        self._bg_task: Optional[asyncio.Task] = None
+        self._ready: asyncio.Event = asyncio.Event()
+        self._connected: bool = False
+        self._connect_error: Optional[str] = None
+
+    # -- public API ----------------------------------------------------------
+
     async def connect(self) -> bool:
-        """Connect to the MCP server. Returns True on success."""
+        """Spawn the background task and wait until it reports ready."""
         if not _check_mcp_available():
             return False
 
+        self._ready = asyncio.Event()
+        self._bg_task = asyncio.create_task(self._bg_run(), name=f"mcp-{self.name}")
+        await self._ready.wait()
+
+        if self._connect_error:
+            log.error("MCP [%s]: %s", self.name, self._connect_error)
+        return self._connected
+
+    async def disconnect(self) -> None:
+        """Cancel the background task (which triggers proper cleanup)."""
+        if self._bg_task and not self._bg_task.done():
+            self._bg_task.cancel()
+            try:
+                await self._bg_task
+            except asyncio.CancelledError:
+                pass
+        self._bg_task = None
+        self.session = None
+        self._connected = False
+        log.info("MCP [%s]: отключён", self.name)
+
+    async def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> str:
+        """Call a tool on this server.  Raises MCPToolError on failure."""
+        if not self._connected or not self.session:
+            raise MCPToolError(f"MCP-сервер '{self.name}' не подключён")
+
+        log.info("MCP [%s]: вызов инструмента %s(%s)", self.name, tool_name,
+                  json.dumps(arguments, ensure_ascii=False)[:200])
+
+        result = await self.session.call_tool(tool_name, arguments)
+
+        parts = []
+        for content in result.content:
+            if hasattr(content, "text"):
+                parts.append(content.text)
+            elif hasattr(content, "data"):
+                parts.append(content.data)
+            else:
+                parts.append(str(content))
+
+        text = "\n".join(parts) if parts else ""
+
+        if getattr(result, "isError", False):
+            raise MCPToolError(f"MCP tool '{tool_name}' вернул ошибку", details=text)
+
+        return text
+
+    def get_openai_tools(self) -> list[dict]:
+        return self._openai_tools
+
+    def has_tool(self, name: str) -> bool:
+        return any(t.name == name for t in self._tools_cache)
+
+    # -- background task -----------------------------------------------------
+
+    async def _bg_run(self) -> None:
+        """Owns the MCP context managers.  Runs until cancelled."""
         try:
             if self.transport_type == "stdio":
-                return await self._connect_stdio()
+                await self._bg_stdio()
             elif self.transport_type == "sse":
-                return await self._connect_sse()
+                await self._bg_sse()
             else:
-                log.error("MCP [%s]: неизвестный транспорт '%s'", self.name, self.transport_type)
-                return False
+                self._connect_error = f"неизвестный транспорт '{self.transport_type}'"
+                self._ready.set()
+        except asyncio.CancelledError:
+            log.debug("MCP [%s]: background task cancelled", self.name)
         except Exception as e:
-            log.error("MCP [%s]: ошибка подключения: %s", self.name, e)
-            return False
+            self._connect_error = str(e)
+            self._ready.set()
 
-    async def _connect_stdio(self) -> bool:
+    async def _bg_stdio(self) -> None:
         from mcp import ClientSession
         from mcp.client.stdio import stdio_client, StdioServerParameters
 
         command = self.config.get("command", "")
         if not command:
-            log.error("MCP [%s]: не указан 'command' для stdio транспорта", self.name)
-            return False
+            self._connect_error = "не указан 'command' для stdio транспорта"
+            self._ready.set()
+            return
 
-        # Resolve command path
         resolved = shutil.which(command)
         if resolved:
             command = resolved
@@ -152,45 +228,41 @@ class MCPServerConnection:
             cwd=cwd,
         )
 
-        # stdio_client returns an async context manager
-        self._cleanup_cm = stdio_client(server_params)
-        streams = await self._cleanup_cm.__aenter__()
-        self._read_stream, self._write_stream = streams
+        # All context managers live & die inside this single task
+        async with stdio_client(server_params) as (read_stream, write_stream):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                self.session = session
+                await self._load_tools()
+                self._connected = True
+                self._ready.set()
+                log.info("MCP [%s]: подключён (stdio: %s %s)", self.name, command, " ".join(args))
 
-        self.session = ClientSession(self._read_stream, self._write_stream)
-        await self.session.__aenter__()
+                # Park until cancelled — keeps the context managers alive
+                await asyncio.Future()
 
-        # Initialize
-        await self.session.initialize()
-        log.info("MCP [%s]: подключён (stdio: %s %s)", self.name, command, " ".join(args))
-
-        # Load tools
-        await self._load_tools()
-        return True
-
-    async def _connect_sse(self) -> bool:
+    async def _bg_sse(self) -> None:
         from mcp import ClientSession
         from mcp.client.sse import sse_client
 
         url = self.config.get("url", "")
         if not url:
-            log.error("MCP [%s]: не указан 'url' для SSE транспорта", self.name)
-            return False
+            self._connect_error = "не указан 'url' для SSE транспорта"
+            self._ready.set()
+            return
 
         headers = self.config.get("headers", {})
 
-        self._cleanup_cm = sse_client(url=url, headers=headers)
-        streams = await self._cleanup_cm.__aenter__()
-        self._read_stream, self._write_stream = streams
+        async with sse_client(url=url, headers=headers) as (read_stream, write_stream):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                self.session = session
+                await self._load_tools()
+                self._connected = True
+                self._ready.set()
+                log.info("MCP [%s]: подключён (sse: %s)", self.name, url)
 
-        self.session = ClientSession(self._read_stream, self._write_stream)
-        await self.session.__aenter__()
-
-        await self.session.initialize()
-        log.info("MCP [%s]: подключён (sse: %s)", self.name, url)
-
-        await self._load_tools()
-        return True
+                await asyncio.Future()
 
     async def _load_tools(self) -> None:
         result = await self.session.list_tools()
@@ -202,49 +274,6 @@ class MCPServerConnection:
             len(self._tools_cache),
             ", ".join(t.name for t in self._tools_cache),
         )
-
-    async def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> str:
-        """Call a tool on this server and return the result as text."""
-        if not self.session:
-            return f"Ошибка: MCP-сервер '{self.name}' не подключён"
-
-        log.info("MCP [%s]: вызов инструмента %s(%s)", self.name, tool_name,
-                  json.dumps(arguments, ensure_ascii=False)[:200])
-
-        result = await self.session.call_tool(tool_name, arguments)
-
-        # Collect all text content
-        parts = []
-        for content in result.content:
-            if hasattr(content, "text"):
-                parts.append(content.text)
-            elif hasattr(content, "data"):
-                parts.append(content.data)
-            else:
-                parts.append(str(content))
-
-        return "\n".join(parts) if parts else ""
-
-    def get_openai_tools(self) -> list[dict]:
-        """Return tools in OpenAI function calling format."""
-        return self._openai_tools
-
-    def has_tool(self, name: str) -> bool:
-        """Check if this server has a tool with the given name."""
-        return any(t.name == name for t in self._tools_cache)
-
-    async def disconnect(self) -> None:
-        """Disconnect from the MCP server."""
-        try:
-            if self.session:
-                await self.session.__aexit__(None, None, None)
-                self.session = None
-            if self._cleanup_cm:
-                await self._cleanup_cm.__aexit__(None, None, None)
-                self._cleanup_cm = None
-            log.info("MCP [%s]: отключён", self.name)
-        except Exception as e:
-            log.warning("MCP [%s]: ошибка при отключении: %s", self.name, e)
 
 
 # ---------------------------------------------------------------------------
@@ -263,11 +292,7 @@ class MCPClientManager:
         self._tool_to_server: dict[str, str] = {}  # tool_name → server_name
 
     async def connect_all(self, mcp_config: dict[str, dict]) -> None:
-        """Connect to all configured MCP servers.
-
-        Args:
-            mcp_config: Map of server_name → server_config from env.json.
-        """
+        """Connect to all configured MCP servers."""
         if not mcp_config:
             log.info("MCP: серверы не настроены")
             return
@@ -282,7 +307,6 @@ class MCPClientManager:
             success = await conn.connect()
             if success:
                 self._servers[name] = conn
-                # Register tools in the lookup
                 for t in conn._tools_cache:
                     if t.name in self._tool_to_server:
                         existing = self._tool_to_server[t.name]
@@ -331,6 +355,8 @@ class MCPClientManager:
 
         try:
             return await conn.call_tool(tool_name, arguments)
+        except MCPToolError:
+            raise
         except Exception as e:
             log.error("MCP [%s]: ошибка вызова %s: %s", server_name, tool_name, e)
             return f"Ошибка MCP [{server_name}] {tool_name}: {e}"
