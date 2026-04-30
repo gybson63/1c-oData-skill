@@ -3,13 +3,30 @@ name: odata
 description: Получение данных из 1С:Предприятие через стандартный OData-интерфейс
 ---
 
-# OData — запросы к данным 1С
+# OData — запросы к данным 1С через MCP fetch
 
 ## Описание
 
 Скилл для получения данных из 1С:Предприятие через стандартный REST OData-интерфейс.
 1С реализует **OData версии 3.0** (протокол `odata/standard.odata`).
 Работает с любой конфигурацией 1С, где опубликована база через веб-сервер.
+
+## MCP-инструмент fetch
+
+Для запросов к 1С OData используется MCP-инструмент **`fetch`** (пакет `@modelcontextprotocol/server-fetch`).
+
+Все запросы выполняются через вызов:
+
+```
+fetch(
+  url="полный_URL_запроса",
+  method="GET",
+  headers={
+    "Authorization": "Basic <base64>",
+    "Accept": "application/json"
+  }
+)
+```
 
 ## Настройка credentials
 
@@ -25,26 +42,32 @@ Credentials хранятся в файле `env.json` (вне репозитор
 }
 ```
 
-## Подготовка переменных
+## Подготовка авторизации
 
-Перед выполнением запросов загрузите переменные из `env.json` через Node.js:
+Заголовок `Authorization` формируется один раз — Base64-кодировка строки `логин:пароль`:
 
-```bash
-ODATA_URL=$(node -e "const d=require('./env.json').default; process.stdout.write(d.odata_url)")
-
-ODATA_AUTH=$(node -e "const d=require('./env.json').default; process.stdout.write(Buffer.from(d.odata_user+':'+d.odata_password).toString('base64'))")
+```
+"Authorization": "Basic " + Base64Encode(odata_user + ":" + odata_password)
 ```
 
-> **Важно:** `curl -u "user:pass"` не работает с кириллицей на Windows — используй только заголовок `Authorization: Basic`.
-> PowerShell не подходит для base64-кодирования кириллических паролей — ломает кодировку.
+> **Важно:** Используйте **только** заголовок `Authorization: Basic`.
+> Кодировка кириллических паролей корректно работает через Base64 в UTF-8.
+
+## Базовый URL
+
+Базовый URL берётся из `env.json` → `odata_url`, например:
+`http://localhost/your_base/odata/standard.odata`
+
+Все пути ресурсов добавляются после него через `/`.
 
 ## Проверить доступные сущности
 
-```bash
-curl -s \
-  -H "Authorization: Basic $ODATA_AUTH" \
-  -H "Accept: application/json" \
-  "$ODATA_URL/"
+```
+fetch(
+  url="http://localhost/your_base/odata/standard.odata/",
+  method="GET",
+  headers={"Authorization": "Basic <base64>", "Accept": "application/json"}
+)
 ```
 
 ## Типы объектов 1С в OData
@@ -86,26 +109,10 @@ curl -s \
 |---------|-----------|--------|
 | `_RecordType` | Записи регистра | `AccumulationRegister_Продажи_RecordType` |
 
-Примеры запросов:
-
-```bash
-# Записи регистра сведений
-curl -s \
-  -H "Authorization: Basic $ODATA_AUTH" \
-  -H "Accept: application/json" \
-  "$ODATA_URL/InformationRegister_%D0%A6%D0%B5%D0%BD%D1%8B_RecordType?\$top=10&\$format=json"
-
-# Срез последних регистра сведений
-curl -s \
-  -H "Authorization: Basic $ODATA_AUTH" \
-  -H "Accept: application/json" \
-  "$ODATA_URL/InformationRegister_%D0%A6%D0%B5%D0%BD%D1%8B_%D0%A1%D1%80%D0%B5%D0%B7%D0%9F%D0%BE%D1%81%D0%BB%D0%B5%D0%B4%D0%BD%D0%B8%D1%85?\$format=json"
-```
-
 ## Табличные части
 
-Табличные части объектов (справочников, документов и др.) доступны как отдельные ресурсы.
-Имя ресурса табличной части: **`ИмяРесурсаОбъекта_ИмяТабличнойЧасти`**.
+Табличные части объектов доступны как отдельные ресурсы.
+Имя ресурса: **`ИмяРесурсаОбъекта_ИмяТабличнойЧасти`**.
 
 Например, табличная часть `Адреса` справочника `Сотрудники`:
 `Catalog_Сотрудники_Адреса`
@@ -114,14 +121,6 @@ curl -s \
 - `LineNumber` — номер строки
 - реквизиты табличной части
 - `_Key` / `_Type` суффиксы для ссылочных и составных полей
-
-```bash
-# Запрос табличной части
-curl -s \
-  -H "Authorization: Basic $ODATA_AUTH" \
-  -H "Accept: application/json" \
-  "$ODATA_URL/Catalog_%D0%A1%D0%BE%D1%82%D1%80%D1%83%D0%B4%D0%BD%D0%B8%D0%BA%D0%B8_%D0%90%D0%B4%D1%80%D0%B5%D1%81%D0%B0?\$format=json"
-```
 
 ## Стандартные поля OData по типам объектов
 
@@ -177,13 +176,13 @@ curl -s \
 
 | Параметр | Описание | Пример |
 |----------|----------|--------|
-| `$top` | Ограничить кол-во записей | `\$top=10` |
-| `$skip` | Пропустить N записей | `\$skip=20` |
-| `$filter` | Фильтрация | `\$filter=DeletionMark eq false` |
-| `$select` | Выбрать конкретные поля | `\$select=Ref_Key,Description` |
-| `$orderby` | Сортировка | `\$orderby=Description asc` |
-| `$expand` | Раскрыть связанные объекты | `\$expand=Организация` |
-| `$format` | Формат ответа | `\$format=json` |
+| `$top` | Ограничить кол-во записей | `$top=10` |
+| `$skip` | Пропустить N записей | `$skip=20` |
+| `$filter` | Фильтрация | `$filter=DeletionMark eq false` |
+| `$select` | Выбрать конкретные поля | `$select=Ref_Key,Description` |
+| `$orderby` | Сортировка | `$orderby=Description asc` |
+| `$expand` | Раскрыть связанные объекты | `$expand=Организация` |
+| `$format` | Формат ответа | `$format=json` |
 
 ## Операторы фильтрации
 
@@ -191,20 +190,20 @@ curl -s \
 
 | Оператор | Описание | Пример |
 |----------|----------|--------|
-| `eq` | Равно | `\$filter=DeletionMark eq false` |
-| `ne` | Не равно | `\$filter=Code ne '000'` |
-| `gt` | Больше | `\$filter=Date gt datetime'2024-01-01T00:00:00'` |
-| `ge` | Больше или равно | `\$filter=Date ge datetime'2024-01-01T00:00:00'` |
-| `lt` | Меньше | `\$filter=Date lt datetime'2024-12-31T23:59:59'` |
-| `le` | Меньше или равно | `\$filter=Code le '000100'` |
+| `eq` | Равно | `$filter=DeletionMark eq false` |
+| `ne` | Не равно | `$filter=Code ne '000'` |
+| `gt` | Больше | `$filter=Date gt datetime'2024-01-01T00:00:00'` |
+| `ge` | Больше или равно | `$filter=Date ge datetime'2024-01-01T00:00:00'` |
+| `lt` | Меньше | `$filter=Date lt datetime'2024-12-31T23:59:59'` |
+| `le` | Меньше или равно | `$filter=Code le '000100'` |
 
 ### Строковые функции
 
 | Функция | Описание | Пример |
-|---------|----------|--------|
-| `substringof` | Содержит подстроку | `\$filter=substringof('Иванов', Description) eq true` |
-| `startswith` | Начинается с | `\$filter=startswith(Code, '000')` |
-| `endswith` | Заканчивается на | `\$filter=endswith(Description, 'ов')` |
+|---------|-----------|--------|
+| `substringof` | Содержит подстроку | `$filter=substringof('Иванов', Description) eq true` |
+| `startswith` | Начинается с | `$filter=startswith(Code, '000')` |
+| `endswith` | Заканчивается на | `$filter=endswith(Description, 'ов')` |
 
 > **Важно:** 1С использует OData v3. Синтаксис `substringof` отличается от OData v4:
 > - v3: `substringof('значение', Поле) eq true`
@@ -214,9 +213,9 @@ curl -s \
 
 | Оператор | Описание | Пример |
 |----------|----------|--------|
-| `and` | Логическое И | `\$filter=DeletionMark eq false and Date gt datetime'2024-01-01T00:00:00'` |
-| `or` | Логическое ИЛИ | `\$filter=Code eq '001' or Code eq '002'` |
-| `not` | Отрицание | `\$filter=not(DeletionMark eq true)` |
+| `and` | Логическое И | `$filter=DeletionMark eq false and Date gt datetime'2024-01-01T00:00:00'` |
+| `or` | Логическое ИЛИ | `$filter=Code eq '001' or Code eq '002'` |
+| `not` | Отрицание | `$filter=not(DeletionMark eq true)` |
 
 ### Формат значений в фильтрах
 
@@ -228,107 +227,149 @@ curl -s \
 | Дата | `datetime'YYYY-MM-DDTHH:MM:SS'` | `datetime'2024-01-01T00:00:00'` |
 | UUID (Ref_Key) | `guid'uuid'` | `guid'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'` |
 
-## Примеры запросов
+## URL-кодирование кириллических имён
+
+Имена объектов 1С (на русском) нужно URL-кодировать перед подстановкой в URL.
+Используйте функцию `encodeURIComponent()` — это стандарт URL-кодировки UTF-8.
+
+Примеры закодированных имён:
+
+| Имя 1С | URL-encoded |
+|--------|-------------|
+| `Сотрудники` | `%D0%A1%D0%BE%D1%82%D1%80%D1%83%D0%B4%D0%BD%D0%B8%D0%BA%D0%B8` |
+| `ФизическиеЛица` | `%D0%A4%D0%B8%D0%B7%D0%B8%D1%87%D0%B5%D1%81%D0%BA%D0%B8%D0%B5%D0%9B%D0%B8%D1%86%D0%B0` |
+| `Организации` | `%D0%9E%D1%80%D0%B3%D0%B0%D0%BD%D0%B8%D0%B7%D0%B0%D1%86%D0%B8%D0%B8` |
+
+## Примеры запросов через fetch
 
 ### Запросить данные справочника
 
-```bash
-ENCODED=$(node -e "process.stdout.write(encodeURIComponent('Сотрудники'))")
-
-curl -s \
-  -H "Authorization: Basic $ODATA_AUTH" \
-  -H "Accept: application/json" \
-  "$ODATA_URL/Catalog_${ENCODED}?\$top=10&\$format=json"
+```
+fetch(
+  url="http://localhost/your_base/odata/standard.odata/Catalog_%D0%A1%D0%BE%D1%82%D1%80%D1%83%D0%B4%D0%BD%D0%B8%D0%BA%D0%B8?$top=10&$format=json",
+  method="GET",
+  headers={"Authorization": "Basic <base64>", "Accept": "application/json"}
+)
 ```
 
 ### Запросить данные документа
 
-```bash
-ENCODED=$(node -e "process.stdout.write(encodeURIComponent('Отпуск'))")
-
-curl -s \
-  -H "Authorization: Basic $ODATA_AUTH" \
-  -H "Accept: application/json" \
-  "$ODATA_URL/Document_${ENCODED}?\$top=5&\$format=json"
+```
+fetch(
+  url="http://localhost/your_base/odata/standard.odata/Document_%D0%9E%D1%82%D0%BF%D1%83%D1%81%D0%BA?$top=5&$format=json",
+  method="GET",
+  headers={"Authorization": "Basic <base64>", "Accept": "application/json"}
+)
 ```
 
 ### Получить конкретную запись по GUID
 
-```bash
-curl -s \
-  -H "Authorization: Basic $ODATA_AUTH" \
-  -H "Accept: application/json" \
-  "$ODATA_URL/Catalog_%D0%A1%D0%BE%D1%82%D1%80%D1%83%D0%B4%D0%BD%D0%B8%D0%BA%D0%B8(guid'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee')?\$format=json"
+```
+fetch(
+  url="http://localhost/your_base/odata/standard.odata/Catalog_%D0%A1%D0%BE%D1%82%D1%80%D1%83%D0%B4%D0%BD%D0%B8%D0%BA%D0%B8(guid'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee')?$format=json",
+  method="GET",
+  headers={"Authorization": "Basic <base64>", "Accept": "application/json"}
+)
 ```
 
 ### Подсчитать количество записей (`$count`)
 
-```bash
-curl -s \
-  -H "Authorization: Basic $ODATA_AUTH" \
-  -H "Accept: application/json" \
-  "$ODATA_URL/Catalog_%D0%A1%D0%BE%D1%82%D1%80%D1%83%D0%B4%D0%BD%D0%B8%D0%BA%D0%B8/\$count"
+```
+fetch(
+  url="http://localhost/your_base/odata/standard.odata/Catalog_%D0%A1%D0%BE%D1%82%D1%80%D1%83%D0%B4%D0%BD%D0%B8%D0%BA%D0%B8/$count",
+  method="GET",
+  headers={"Authorization": "Basic <base64>", "Accept": "application/json"}
+)
 ```
 
 ### Выбрать конкретные поля (`$select`)
 
-```bash
-curl -s \
-  -H "Authorization: Basic $ODATA_AUTH" \
-  -H "Accept: application/json" \
-  "$ODATA_URL/Catalog_%D0%A1%D0%BE%D1%82%D1%80%D1%83%D0%B4%D0%BD%D0%B8%D0%BA%D0%B8?\$select=Ref_Key,Description,Code&\$format=json"
+```
+fetch(
+  url="http://localhost/your_base/odata/standard.odata/Catalog_%D0%A1%D0%BE%D1%82%D1%80%D1%83%D0%B4%D0%BD%D0%B8%D0%BA%D0%B8?$select=Ref_Key,Description,Code&$format=json",
+  method="GET",
+  headers={"Authorization": "Basic <base64>", "Accept": "application/json"}
+)
 ```
 
 ### Раскрыть связанный объект (`$expand`)
 
-```bash
-# Раскрыть поле Организация (вместо _Key будет вложенный объект)
-curl -s \
-  -H "Authorization: Basic $ODATA_AUTH" \
-  -H "Accept: application/json" \
-  "$ODATA_URL/Document_%D0%9E%D1%82%D0%BF%D1%83%D1%81%D0%BA?\$expand=Организация&\$top=5&\$format=json"
+```
+fetch(
+  url="http://localhost/your_base/odata/standard.odata/Document_%D0%9E%D1%82%D0%BF%D1%83%D1%81%D0%BA?$expand=Организация&$top=5&$format=json",
+  method="GET",
+  headers={"Authorization": "Basic <base64>", "Accept": "application/json"}
+)
 ```
 
 ### Фильтрация по дате
 
-```bash
-# Документы за период
-curl -s \
-  -H "Authorization: Basic $ODATA_AUTH" \
-  -H "Accept: application/json" \
-  "$ODATA_URL/Document_%D0%9E%D1%82%D0%BF%D1%83%D1%81%D0%BA?\$filter=Date ge datetime'2024-01-01T00:00:00' and Date le datetime'2024-12-31T23:59:59'&\$format=json"
+```
+fetch(
+  url="http://localhost/your_base/odata/standard.odata/Document_%D0%9E%D1%82%D0%BF%D1%83%D1%81%D0%BA?$filter=Date ge datetime'2024-01-01T00:00:00' and Date le datetime'2024-12-31T23:59:59'&$format=json",
+  method="GET",
+  headers={"Authorization": "Basic <base64>", "Accept": "application/json"}
+)
 ```
 
-### Фильтрация по наименованию
+### Фильтрация по наименованию (OData v3 синтаксис!)
 
-```bash
-# Поиск по подстроке в наименовании (OData v3 синтаксис!)
-curl -s \
-  -H "Authorization: Basic $ODATA_AUTH" \
-  -H "Accept: application/json" \
-  "$ODATA_URL/Catalog_%D0%A1%D0%BE%D1%82%D1%80%D1%83%D0%B4%D0%BD%D0%B8%D0%BA%D0%B8?\$filter=substringof('Иванов', Description) eq true&\$format=json"
+```
+fetch(
+  url="http://localhost/your_base/odata/standard.odata/Catalog_%D0%A1%D0%BE%D1%82%D1%80%D1%83%D0%B4%D0%BD%D0%B8%D0%BA%D0%B8?$filter=substringof('Иванов', Description) eq true&$format=json",
+  method="GET",
+  headers={"Authorization": "Basic <base64>", "Accept": "application/json"}
+)
+```
+
+### Записи регистра сведений
+
+```
+fetch(
+  url="http://localhost/your_base/odata/standard.odata/InformationRegister_%D0%A6%D0%B5%D0%BD%D1%8B_RecordType?$top=10&$format=json",
+  method="GET",
+  headers={"Authorization": "Basic <base64>", "Accept": "application/json"}
+)
+```
+
+### Срез последних регистра сведений
+
+```
+fetch(
+  url="http://localhost/your_base/odata/standard.odata/InformationRegister_%D0%A6%D0%B5%D0%BD%D1%8B_%D0%A1%D1%80%D0%B5%D0%B7%D0%9F%D0%BE%D1%81%D0%BB%D0%B5%D0%B4%D0%BD%D0%B8%D1%85?$format=json",
+  method="GET",
+  headers={"Authorization": "Basic <base64>", "Accept": "application/json"}
+)
 ```
 
 ### Запрос константы
 
-```bash
-ENCODED=$(node -e "process.stdout.write(encodeURIComponent('АдресПубликацииИнформационнойБазыВЛокальнойСети'))")
-
-curl -s \
-  -H "Authorization: Basic $ODATA_AUTH" \
-  -H "Accept: application/json" \
-  "$ODATA_URL/Constant_${ENCODED}/\$value"
+```
+fetch(
+  url="http://localhost/your_base/odata/standard.odata/Constant_%D0%90%D0%B4%D1%80%D0%B5%D1%81%D0%9F%D1%83%D0%B1%D0%BB%D0%B8%D0%BA%D0%B0%D1%86%D0%B8%D0%B8/$value",
+  method="GET",
+  headers={"Authorization": "Basic <base64>", "Accept": "application/json"}
+)
 ```
 
 ### Запрос перечисления
 
-```bash
-ENCODED=$(node -e "process.stdout.write(encodeURIComponent('ПолФизическогоЛица'))")
+```
+fetch(
+  url="http://localhost/your_base/odata/standard.odata/Enum_%D0%9F%D0%BE%D0%BB%D0%A4%D0%B8%D0%B7%D0%B8%D1%87%D0%B5%D1%81%D0%BA%D0%BE%D0%B3%D0%BE%D0%9B%D0%B8%D1%86%D0%B0?$format=json",
+  method="GET",
+  headers={"Authorization": "Basic <base64>", "Accept": "application/json"}
+)
+```
 
-curl -s \
-  -H "Authorization: Basic $ODATA_AUTH" \
-  -H "Accept: application/json" \
-  "$ODATA_URL/Enum_${ENCODED}?\$format=json"
+### Запрос табличной части
+
+```
+fetch(
+  url="http://localhost/your_base/odata/standard.odata/Catalog_%D0%A1%D0%BE%D1%82%D1%80%D1%83%D0%B4%D0%BD%D0%B8%D0%BA%D0%B8_%D0%90%D0%B4%D1%80%D0%B5%D1%81%D0%B0?$format=json",
+  method="GET",
+  headers={"Authorization": "Basic <base64>", "Accept": "application/json"}
+)
 ```
 
 ## Формат ответа
@@ -349,26 +390,6 @@ curl -s \
 }
 ```
 
-## URL-кодирование кириллических имён
-
-Имена объектов 1С (на русском) нужно URL-кодировать перед подстановкой в URL:
-
-```bash
-# Node.js
-ENCODED=$(node -e "process.stdout.write(encodeURIComponent('ИмяОбъекта'))")
-
-# Python
-python -c "from urllib.parse import quote; print(quote('ИмяОбъекта'))"
-```
-
-Примеры закодированных имён:
-
-| Имя 1С | URL-encoded |
-|--------|-------------|
-| `Сотрудники` | `%D0%A1%D0%BE%D1%82%D1%80%D1%83%D0%B4%D0%BD%D0%B8%D0%BA%D0%B8` |
-| `ФизическиеЛица` | `%D0%A4%D0%B8%D0%B7%D0%B8%D1%87%D0%B5%D1%81%D0%BA%D0%B8%D0%B5%D0%9B%D0%B8%D1%86%D0%B0` |
-| `Организации` | `%D0%9E%D1%80%D0%B3%D0%B0%D0%BD%D0%B8%D0%B7%D0%B0%D1%86%D0%B8%D0%B8` |
-
 ## Включить объект в OData
 
 Если объект не появляется в списке сущностей, он не опубликован.
@@ -384,12 +405,8 @@ python -c "from urllib.parse import quote; print(quote('ИмяОбъекта'))"
 
 ### 401 Unauthorized / 401.5
 
-Неверная кодировка credentials. Убедитесь, что используете заголовок `Authorization: Basic`,
-а не флаг `-u` в curl.
-
-### `Параметр не поддерживается`
-
-Знак `$` интерпретируется bash как переменная. Экранируйте его: `\$top`, `\$filter`.
+Неверная кодировка credentials. Убедитесь, что используете заголовок `Authorization: Basic`
+с корректной Base64-кодировкой строки `логин:пароль` в UTF-8.
 
 ### Объект не найден в списке сущностей
 
