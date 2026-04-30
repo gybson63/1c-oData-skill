@@ -1,2 +1,4 @@
 python-telegram-bot>=20.0
 openai>=1.0.0
+# MCP SDK (для собственного MCP-сервера odata_server.py и MCP-клиента):
+mcp>=1.0

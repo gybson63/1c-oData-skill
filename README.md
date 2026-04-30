@@ -125,6 +125,7 @@ python bot/bot.py
 | [`skills/odata/SKILL.md`](skills/odata/SKILL.md) | OData-запросы: параметры, фильтры, примеры |
 | [`skills/1cconfinfo/SKILL.md`](skills/1cconfinfo/SKILL.md) | Анализ XML-выгрузки конфигурации 1С |
 | [`docs/1c-value-tree-in-forms.md`](docs/1c-value-tree-in-forms.md) | Деревья значений в управляемых формах 1С |
+| [`docs/mcp-recommendations.md`](docs/mcp-recommendations.md) | Рекомендации MCP-серверов для расширения проекта |
 | [`processing/README.md`](processing/README.md) | Описание обработки EnableODataInterface |
 
 ---

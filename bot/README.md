@@ -14,6 +14,7 @@
     │ (при необходимости вызывает инструменты):
     │   odata_reference(topic)   — справка по синтаксису OData
     │   get_entity_fields(name)  — список полей объекта из $metadata
+    │   <MCP-инструменты>        — инструменты подключённых MCP-серверов
     │ JSON: entity, filter, select, orderby, top, count
     ▼
 [OData 1С]  HTTP GET /Entity?...  или  /Entity/$count
@@ -36,6 +37,9 @@ Telegram-ответ
 
 ```bash
 pip install python-telegram-bot openai
+
+# Опционально — для подключения MCP-серверов:
+pip install mcp
 ```
 
 ### 2. Настройка env.json
@@ -84,6 +88,7 @@ python bot/bot.py --env-file /path/to/env.json --cache-dir /path/to/.cache
 | `odata_url` | ✅ | URL OData-интерфейса базы 1С | `http://host/base/odata/standard.odata` |
 | `odata_user` | ✅ | Пользователь 1С | `Администратор` |
 | `odata_password` | ✅ | Пароль пользователя 1С | `пароль` |
+| `mcp_servers` | — | Конфигурация MCP-серверов (см. ниже) | `{}` |
 
 Все поля можно задать через переменные окружения: `TELEGRAM_TOKEN`, `AI_API_KEY`, `AI_BASE_URL`, `AI_MODEL`, `ODATA_URL`, `ODATA_USER`, `ODATA_PASSWORD`.
 
@@ -99,6 +104,49 @@ python bot/bot.py --env-file /path/to/env.json --cache-dir /path/to/.cache
 ```
 
 Запуск с профилем: `python bot/bot.py --profile production`
+
+### Подключение MCP-серверов
+
+Бот может подключать **внешние MCP-серверы** (Model Context Protocol) и использовать их инструменты как функции ИИ. Это позволяет расширять возможности бота без изменения кода.
+
+Конфигурация в `env.json`:
+
+```json
+{
+  "default": {
+    ...,
+    "mcp_servers": {
+      "filesystem": {
+        "transport": "stdio",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/dir"]
+      },
+      "web_search": {
+        "transport": "sse",
+        "url": "http://localhost:3001/sse",
+        "headers": {"Authorization": "Bearer token123"}
+      }
+    }
+  }
+}
+```
+
+**Параметры MCP-сервера:**
+
+| Поле | Описание |
+|------|----------|
+| `transport` | `"stdio"` (дочерний процесс) или `"sse"` (HTTP SSE) |
+| `command` | Команда запуска (только для `stdio`) |
+| `args` | Аргументы командной строки (только для `stdio`) |
+| `env` | Дополнительные переменные окружения (только для `stdio`) |
+| `cwd` | Рабочая директория (только для `stdio`) |
+| `url` | URL SSE-эндпоинта (только для `sse`) |
+| `headers` | HTTP-заголовки (только для `sse`) |
+
+Инструменты MCP-серверов автоматически:
+- Загружаются при старте бота
+- Добавляются в список функций ИИ на шаге генерации запроса
+- Вызываются через `_dispatch_tool_call` при обращении ИИ
 
 ---
 
@@ -160,6 +208,7 @@ python bot/bot.py --env-file /path/to/env.json --cache-dir /path/to/.cache
 ```
 bot/
   bot.py            — основной код бота
+  mcp_client.py     — MCP-клиент для подключения внешних MCP-серверов
   master_prompt.md  — промпт форматирования ответов (шаг 2)
   config_hint.md    — терминология конфигурации 1С (шаг 1)
   README.md         — это описание

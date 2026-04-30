@@ -17,13 +17,18 @@ import urllib.parse
 from xml.etree import ElementTree as ET
 import urllib.request
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from html import escape as _html_escape
 
 from openai import AsyncOpenAI
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
+
+try:
+    from bot.mcp_client import MCPClientManager
+except ImportError:
+    MCPClientManager = None  # type: ignore[assignment,misc]
 
 
 def _esc(text: str) -> str:
@@ -562,6 +567,59 @@ async def execute_odata_count(
 
 
 # ---------------------------------------------------------------------------
+# OData execution: MCP-first with direct HTTP fallback
+# ---------------------------------------------------------------------------
+
+async def _execute_query(entity: str, filter_expr: Optional[str],
+                          select: Optional[str], orderby: Optional[str],
+                          top: int = 20) -> tuple[list, Optional[int]]:
+    """Execute OData query — via MCP server if connected, otherwise direct HTTP."""
+    if _mcp_manager is not None and _mcp_manager.is_connected():
+        args: dict[str, Any] = {"entity": entity, "top": top}
+        if filter_expr:
+            args["filter_expr"] = filter_expr
+        if select:
+            args["select"] = select
+        if orderby:
+            args["orderby"] = orderby
+        log.info("→ MCP odata_query: entity=%s, top=%d", entity, top)
+        try:
+            result_text = await _mcp_manager.call_tool("odata_query", args)
+            result = json.loads(result_text)
+            if "error" in result and "value" not in result:
+                raise ODataError(result["error"], status_code=result.get("status_code", 0))
+            return result.get("value", []), None
+        except json.JSONDecodeError:
+            log.warning("MCP response not JSON, falling back to direct HTTP")
+    # Fallback: direct HTTP
+    log.info("→ Direct HTTP odata_query: entity=%s", entity)
+    auth = make_auth_header(_cfg["odata_user"], _cfg["odata_password"])
+    return await execute_odata_query(_cfg["odata_url"], auth, entity,
+                                      filter_expr, select, orderby, top)
+
+
+async def _execute_count(entity: str, filter_expr: Optional[str]) -> int:
+    """Execute OData count — via MCP server if connected, otherwise direct HTTP."""
+    if _mcp_manager is not None and _mcp_manager.is_connected():
+        args: dict[str, Any] = {"entity": entity}
+        if filter_expr:
+            args["filter_expr"] = filter_expr
+        log.info("→ MCP odata_count: entity=%s", entity)
+        try:
+            result_text = await _mcp_manager.call_tool("odata_count", args)
+            result = json.loads(result_text)
+            if "error" in result and "count" not in result:
+                raise ODataError(result["error"], status_code=result.get("status_code", 0))
+            return result.get("count", 0)
+        except json.JSONDecodeError:
+            log.warning("MCP response not JSON, falling back to direct HTTP")
+    # Fallback: direct HTTP
+    log.info("→ Direct HTTP odata_count: entity=%s", entity)
+    auth = make_auth_header(_cfg["odata_user"], _cfg["odata_password"])
+    return await execute_odata_count(_cfg["odata_url"], auth, entity, filter_expr)
+
+
+# ---------------------------------------------------------------------------
 # AI (OpenAI-compatible protocol)
 # ---------------------------------------------------------------------------
 
@@ -714,14 +772,15 @@ async def _ai_request(client: AsyncOpenAI, **kwargs):
             raise
 
 
-def _dispatch_tool_call(tc, odata_url: str, cache_dir: str) -> str:
-    """Execute a single AI tool call and return the result as a string."""
+async def _dispatch_tool_call(tc, odata_url: str, cache_dir: str) -> str:
+    """Execute a single AI tool call (local or MCP) and return the result as a string."""
     name = tc.function.name
     try:
         args = json.loads(tc.function.arguments or "{}")
     except json.JSONDecodeError:
         return "Ошибка: невалидные аргументы инструмента"
 
+    # --- Built-in tools ---
     if name == "odata_reference":
         topic = args.get("topic", "")
         doc = ODATA_REFERENCE.get(topic)
@@ -737,6 +796,14 @@ def _dispatch_tool_call(tc, odata_url: str, cache_dir: str) -> str:
         if fields:
             return f"Поля {entity_name}:\n" + ", ".join(fields)
         return f"Поля для '{entity_name}' не найдены в кэше $metadata."
+
+    # --- MCP tools ---
+    if _mcp_manager is not None:
+        try:
+            return await _mcp_manager.call_tool(name, args)
+        except Exception as e:
+            log.error("MCP tool '%s' error: %s", name, e)
+            return f"Ошибка MCP-инструмента {name}: {e}"
 
     return f"Неизвестный инструмент: {name}"
 
@@ -758,7 +825,10 @@ async def ai_build_query(client: AsyncOpenAI, model: str,
             system = system + "\n\nОсобенности конфигурации:\n" + _config_hint
         # Offer tools only when metadata is not severely truncated (tool calls add token overhead)
         use_tools = (meta_idx == 0)
-        tools_arg = STEP1_TOOLS if use_tools else None
+        tools_arg: list[dict] | None = list(STEP1_TOOLS) if use_tools else None
+        # Add MCP tools
+        if use_tools and _mcp_manager is not None and tools_arg is not None:
+            tools_arg.extend(_mcp_manager.get_all_openai_tools())
 
         for attempt in range(2):
             extra = "" if attempt == 0 else " Верни ТОЛЬКО JSON без какого-либо текста до или после."
@@ -780,7 +850,7 @@ async def ai_build_query(client: AsyncOpenAI, model: str,
             tool_calls_made = 0
             while (
                 use_tools
-                and tool_calls_made < 3
+                and tool_calls_made < 5
                 and response.choices[0].finish_reason in ("tool_calls", "function_call")
             ):
                 msg = response.choices[0].message
@@ -793,7 +863,7 @@ async def ai_build_query(client: AsyncOpenAI, model: str,
                     ]}
                 messages.append(msg_dict)
                 for tc in msg.tool_calls or []:
-                    tool_result = _dispatch_tool_call(tc, odata_url, cache_dir)
+                    tool_result = await _dispatch_tool_call(tc, odata_url, cache_dir)
                     messages.append({"role": "tool", "tool_call_id": tc.id, "content": tool_result})
                 tool_calls_made += 1
                 try:
@@ -864,6 +934,7 @@ _master_prompt: str = STEP2_SYSTEM
 _master_prompt_file: Path = Path(__file__).parent / "master_prompt.md"
 _config_hint: str = ""
 _config_hint_file: Path = Path(__file__).parent / "config_hint.md"
+_mcp_manager: Any = None  # MCPClientManager instance
 
 # Conversation history per chat: chat_id → [{"role": ..., "content": ...}, ...]
 _history: dict[int, list[dict]] = {}
@@ -967,16 +1038,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if not matched:
             log.warning("Entity '%s' not in metadata", entity)
 
-        auth = make_auth_header(_cfg["odata_user"], _cfg["odata_password"])
-
         if query.get("count"):
-            # Count path: hit /<entity>/$count, no AI step 2 needed
-            count_val = await execute_odata_count(
-                odata_url=_cfg["odata_url"],
-                auth_header=auth,
-                entity=entity,
-                filter_expr=query.get("filter"),
-            )
+            # Count path: via MCP or direct HTTP
+            count_val = await _execute_count(entity, query.get("filter"))
             label = _entity_display_name(entity)
             answer = f"📊 <b>{label}:</b> <code>{count_val}</code> записей"
             history.append({"role": "user", "content": user_text})
@@ -1010,15 +1074,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                         log.info("$orderby '%s' не найден в полях, убираем", field_name)
                         orderby = None
 
-            # Step 2: execute OData
-            records, total = await execute_odata_query(
-                odata_url=_cfg["odata_url"],
-                auth_header=auth,
-                entity=entity,
-                filter_expr=query.get("filter"),
-                select=select,
-                orderby=orderby,
-                top=top,
+            # Step 2: execute OData (via MCP or direct HTTP)
+            records, total = await _execute_query(
+                entity, query.get("filter"), select, orderby, top,
             )
 
             # Step 3: format response
@@ -1063,7 +1121,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    global _cfg, _ai_client, _env_file, _cache_dir
+    global _cfg, _ai_client, _env_file, _cache_dir, _mcp_manager
 
     _ROOT = Path(__file__).parent.parent
     parser = argparse.ArgumentParser(description="1С OData Telegram Bot")
@@ -1098,8 +1156,32 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(error_handler)
 
+    # Connect MCP servers (if configured and mcp package available)
+    mcp_config = _cfg.get("mcp_servers", {})
+    if mcp_config and MCPClientManager is not None:
+        _mcp_manager = MCPClientManager()
+        try:
+            asyncio.run(_mcp_manager.connect_all(mcp_config))
+            status = _mcp_manager.get_status()
+            for srv, info in status.items():
+                log.info("MCP '%s': %s — %d tools: %s",
+                         srv, info["transport"], len(info["tools"]), ", ".join(info["tools"]))
+        except Exception as e:
+            log.error("MCP: ошибка подключения: %s", e)
+            _mcp_manager = None
+    elif mcp_config and MCPClientManager is None:
+        log.warning("MCP-серверы настроены, но пакет 'mcp' не установлен. pip install mcp")
+
     log.info("Бот запущен. Нажмите Ctrl+C для остановки.")
-    app.run_polling(drop_pending_updates=True)
+    try:
+        app.run_polling(drop_pending_updates=True)
+    finally:
+        # Cleanup MCP connections
+        if _mcp_manager is not None:
+            try:
+                asyncio.run(_mcp_manager.disconnect_all())
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
