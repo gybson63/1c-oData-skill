@@ -28,10 +28,12 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+from telegram.request import HTTPXRequest
+from telegram.error import BadRequest, TimedOut
 
 from bot.agents.base import BaseAgent
 from bot.agents.odata import ODataAgent
-from bot.utils import RateLimiter, load_config
+from bot.utils import RateLimiter, load_config, sanitize_telegram_html
 
 log = logging.getLogger(__name__)
 
@@ -206,7 +208,39 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if len(answer) > 4000:
         answer = answer[:4000] + "... (сообщение сокращено)"
 
-    await update.message.reply_text(answer, parse_mode="HTML")
+    # Санитизация HTML перед отправкой
+    safe_answer = sanitize_telegram_html(answer)
+
+    # Отправить: сначала с HTML, при BadRequest — plain text fallback
+    try:
+        await update.message.reply_text(safe_answer, parse_mode="HTML")
+    except BadRequest as e:
+        log.warning("Telegram BadRequest при HTML-отправке: %s. Отправляю plain text.", e)
+        try:
+            # Убрать все HTML-теги для plain-text варианта
+            import re
+            plain = re.sub(r"<[^>]+>", "", safe_answer)
+            if len(plain) > 4000:
+                plain = plain[:4000] + "... (сообщение сокращено)"
+            await update.message.reply_text(plain)
+        except Exception:
+            log.error("Telegram не удалось отправить даже plain text")
+    except TimedOut:
+        # Ретри при таймауте
+        sent = False
+        for attempt in range(2):
+            log.warning("Telegram reply_text TimedOut, retry %d/2", attempt + 1)
+            await asyncio.sleep(2)
+            try:
+                await update.message.reply_text(safe_answer, parse_mode="HTML")
+                sent = True
+                break
+            except TimedOut:
+                continue
+            except BadRequest:
+                break
+        if not sent:
+            log.error("Telegram reply_text failed after retries (TimedOut)")
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -251,14 +285,28 @@ def main() -> None:
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     args = parser.parse_args()
 
-    logging.getLogger().setLevel(args.log_level)
+    logging.basicConfig(
+        level=getattr(logging, args.log_level, logging.INFO),
+        format="%(asctime)s %(name)s %(levelname)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
 
     _env_file = args.env_file
     _cache_dir = args.cache_dir
 
     _cfg = load_config(args.env_file, args.profile)
 
-    app = ApplicationBuilder().token(_cfg["telegram_token"]).post_init(post_init).post_shutdown(post_shutdown).build()
+    # Увеличенные таймауты для Telegram API (default ~10s слишком мало при долгой обработке)
+    request = HTTPXRequest(connect_timeout=30, read_timeout=120, write_timeout=60)
+
+    app = (
+        ApplicationBuilder()
+        .token(_cfg["telegram_token"])
+        .post_init(post_init)
+        .post_shutdown(post_shutdown)
+        .request(request)
+        .build()
+    )
     app.add_handler(CommandHandler("start", handle_start))
     app.add_handler(CommandHandler("status", handle_status))
     app.add_handler(CommandHandler("refresh", handle_refresh))
@@ -266,7 +314,16 @@ def main() -> None:
     app.add_error_handler(error_handler)
 
     log.info("Бот запущен (multi-agent). Нажмите Ctrl+C для остановки.")
-    app.run_polling(drop_pending_updates=True)
+    # Рестарт при сетевых ошибках (ConnectTimeout, TimedOut)
+    while True:
+        try:
+            app.run_polling(drop_pending_updates=True, close_loop=False)
+        except (TimedOut, TimeoutError) as e:
+            log.warning("Polling error (restart): %s", e)
+            import time
+            time.sleep(5)
+            continue
+        break
 
 
 if __name__ == "__main__":
