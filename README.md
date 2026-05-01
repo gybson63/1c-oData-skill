@@ -20,7 +20,24 @@ Credentials хранятся в `env.json` (не в git):
 }
 ```
 
-Загрузить переменные и выполнить запрос:
+#### Через MCP (рекомендуется)
+
+Скилл использует MCP-инструмент **`fetch`** (`@modelcontextprotocol/server-fetch`). Настройте MCP-сервер в конфигурации вашего агента (Cline, Claude Desktop, VS Code, Cursor):
+
+```json
+{
+  "mcpServers": {
+    "1c-odata": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-fetch"]
+    }
+  }
+}
+```
+
+ИИ будет вызывать `fetch(url, method, headers)` вместо генерации bash-команд. См. [`skills/odata/SKILL.md`](skills/odata/SKILL.md).
+
+#### Через curl (альтернатива)
 
 ```bash
 ODATA_URL=$(node -e "const d=require('./env.json').default; process.stdout.write(d.odata_url)")
@@ -35,7 +52,6 @@ curl -s -H "Authorization: Basic $ODATA_AUTH" -H "Accept: application/json" \
 ```
 
 > **Важно:** `curl -u "user:pass"` не работает с кириллицей на Windows — используй только заголовок `Authorization: Basic`.
-> PowerShell не подходит — ломает base64 при кириллических паролях.
 
 ### Типы объектов в URL
 
@@ -152,5 +168,5 @@ env.example.json                  — пример credentials
 
 - 1С:Предприятие 8.3.6+
 - База опубликована на веб-сервере с включённым OData
-- Node.js (для чтения env.json и кодирования запросов)
+- Node.js + npm (для MCP-сервера `@modelcontextprotocol/server-fetch` через `npx`)
 - PowerShell (встроен в Windows — для сборки EPF)
