@@ -1,192 +1,118 @@
-# Telegram-бот для запросов к 1С через OData
+# 1С OData Telegram Bot — Multi-Agent Architecture
 
-Бот принимает вопросы на русском языке, автоматически формирует OData-запрос к базе 1С, получает данные и возвращает отформатированный ответ в чат.
-
----
-
-## Архитектура
+## Структура
 
 ```
-Пользователь
-    │ вопрос на русском
-    ▼
-[ИИ — Шаг 1]  STEP1_SYSTEM + config_hint.md
-    │ (при необходимости вызывает инструменты):
-    │   odata_reference(topic)   — справка по синтаксису OData
-    │   get_entity_fields(name)  — список полей объекта из $metadata
-    │ JSON: entity, filter, select, orderby, top, count
-    ▼
-[OData 1С]  HTTP GET /Entity?...  или  /Entity/$count
-    │ JSON-массив записей (или число)
-    ▼
-[ИИ — Шаг 2]  master_prompt.md (или STEP2_SYSTEM по умолчанию)
-    │   пропускается при count-запросах
-    │ читаемый текст с HTML-разметкой
-    ▼
-Telegram-ответ
+bot/
+├── bot.py                  # Точка входа: Telegram handlers + роутер агентов
+├── utils.py                # Общие утилиты (RateLimiter, load_config, esc_html)
+├── mcp_client.py           # MCP-клиент (Model Context Protocol)
+├── config_hint.md          # Подсказки по конфигурации
+├── master_prompt.md        # Общий промпт бота
+│
+└── agents/
+    ├── __init__.py
+    ├── base.py             # Абстрактный класс BaseAgent
+    │
+    └── odata/              # OData-агент
+        ├── __init__.py
+        ├── agent.py        # Класс ODataAgent (двухшаговая обработка)
+        ├── prompts.py      # Системные промпты и справочник OData
+        ├── metadata.py     # Загрузка и кэширование $metadata
+        └── odata_http.py   # HTTP-запросы к OData API
 ```
 
-Бот кэширует список объектов метаданных 1С (`metadata_summary.json`) и схему полей (`odata_metadata_*.xml`) — это позволяет проверять корректность запроса до отправки в 1С.
+## Архитектура агентов
 
----
+Каждый агент наследует `BaseAgent` и реализует:
 
-## Быстрый старт
+| Метод | Описание |
+|-------|----------|
+| `initialize(agent_config, global_config, ...)` | Инициализация: MCP, AI-клиент, кэш |
+| `shutdown()` | Корректное завершение |
+| `refresh()` | Обновление данных |
+| `process_message(user_text, history)` | Обработка сообщения → (answer, history) |
+| `get_status()` | Статус агента |
 
-### 1. Установка зависимостей
+### Добавление нового агента
 
-```bash
-pip install python-telegram-bot openai
-```
+1. Создать папку `bot/agents/my_agent/` с файлом `agent.py`:
+   ```python
+   from ..base import BaseAgent
 
-### 2. Настройка env.json
+   class MyAgent(BaseAgent):
+       name = "my_agent"
+       # ... реализация методов
+   ```
 
-Создайте (или дополните) `env.json` в корне проекта:
+2. Зарегистрировать в `bot/bot.py`:
+   ```python
+   AGENT_REGISTRY: dict[str, type[BaseAgent]] = {
+       "odata": ODataAgent,
+       "my_agent": MyAgent,  # ← добавить
+   }
+   ```
+
+3. Добавить секцию в `env.json`:
+   ```json
+   {
+     "profiles": {
+       "default": {
+         "agents": {
+           "odata": { ... },
+           "my_agent": {
+             "type": "my_agent",
+             "...": "..."
+           }
+         }
+       }
+     }
+   }
+   ```
+
+## Конфигурация (env.json)
 
 ```json
 {
-  "default": {
-    "telegram_token": "123456:ABC-...",
-    "ai_api_key": "sk-...",
-    "ai_base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
-    "ai_model": "gemini-2.0-flash",
-    "ai_rpm": 15,
-    "odata_url": "http://localhost/your_base/odata/standard.odata",
-    "odata_user": "Администратор",
-    "odata_password": "пароль"
+  "profiles": {
+    "default": {
+      "telegram_token": "...",
+      "ai_api_key": "...",
+      "ai_base_url": "https://api.openai.com/v1",
+      "ai_model": "gpt-4o-mini",
+      "ai_rpm": 20,
+
+      "agents": {
+        "odata": {
+          "type": "odata",
+          "odata_url": "http://host/base/odata/standard.odata",
+          "odata_user": "Администратор",
+          "odata_password": "пароль",
+          "mcp_servers": {
+            "odata": {
+              "command": "python",
+              "args": ["mcp_servers/odata_server.py"],
+              "env": { ... }
+            }
+          }
+        }
+      }
+    }
   }
 }
 ```
 
-### 3. Запуск
+## Запуск
 
 ```bash
-# Из корня проекта:
-python bot/bot.py
-
-# Из папки bot/:
-python bot.py
-
-# С явными путями:
-python bot/bot.py --env-file /path/to/env.json --cache-dir /path/to/.cache
+python -m bot
+# с параметрами:
+python -m bot --env-file env.json --profile default --log-level DEBUG
 ```
 
----
+## Команды Telegram
 
-## Конфигурация (поля env.json)
-
-| Поле | Обязательно | Описание | Пример |
-|------|:-----------:|----------|--------|
-| `telegram_token` | ✅ | Токен бота от @BotFather | `123456:ABC-...` |
-| `ai_api_key` | ✅ | API-ключ провайдера ИИ | `sk-...` |
-| `ai_base_url` | ✅ | Base URL OpenAI-совместимого API | `https://api.openai.com/v1` |
-| `ai_model` | ✅ | Название модели | `gpt-4o-mini`, `gemini-2.0-flash` |
-| `ai_rpm` | — | Лимит запросов к ИИ в минуту (по умолч. 15) | `15` |
-| `odata_url` | ✅ | URL OData-интерфейса базы 1С | `http://host/base/odata/standard.odata` |
-| `odata_user` | ✅ | Пользователь 1С | `Администратор` |
-| `odata_password` | ✅ | Пароль пользователя 1С | `пароль` |
-
-Все поля можно задать через переменные окружения: `TELEGRAM_TOKEN`, `AI_API_KEY`, `AI_BASE_URL`, `AI_MODEL`, `ODATA_URL`, `ODATA_USER`, `ODATA_PASSWORD`.
-
-### Профили
-
-Можно хранить несколько баз в одном файле:
-
-```json
-{
-  "default": { ... },
-  "production": { ... }
-}
-```
-
-Запуск с профилем: `python bot/bot.py --profile production`
-
----
-
-## Команды бота
-
-| Команда | Описание |
-|---------|----------|
-| `/start` | Приветствие, сброс истории диалога, список примеров |
-| `/refresh` | Принудительное обновление метаданных из 1С |
-| Любой текст | Запрос к данным 1С на русском языке |
-
-**Примеры запросов:**
-- `Покажи список организаций`
-- `Сколько контрагентов в базе?`
-- `Найди сотрудников с фамилией Иванов`
-- `Последние 10 документов реализации`
-- `Покажи все реквизиты` *(использует объект из предыдущего запроса)*
-
-Бот сохраняет историю последних 6 пар вопрос/ответ для поддержки контекста диалога.
-
----
-
-## Кастомизация
-
-### master_prompt.md — стиль ответов (Шаг 2)
-
-Системный промпт для шага форматирования ответа. Редактируйте для изменения стиля без перезапуска — перечитывается при каждом `/refresh`.
-
-Если файл отсутствует, используется встроенный `STEP2_SYSTEM` из `bot.py`.
-
-**Промпт задаёт:**
-- HTML-теги Telegram (`<b>`, `<i>`, `<code>`) для форматирования
-- Жирный заголовок с количеством записей в первой строке
-- Блочный вывод каждой записи с подписями полей курсивом
-- Скрытие UUID, служебных полей, пустых дат
-
-### config_hint.md — особенности конфигурации (Шаг 1)
-
-Файл `bot/config_hint.md` добавляется к системному промпту генерации запроса. Используется для описания терминологии конкретной конфигурации 1С — чтобы агент знал, как называются объекты в вашей базе.
-
-**Пример (ЗУП):**
-
-```markdown
-| Что говорит пользователь | Entity в OData |
-|---|---|
-| подразделение, отдел | Catalog_ПодразделенияОрганизаций |
-| сотрудник, работник  | Catalog_Сотрудники |
-| должность            | Catalog_ДолжностиОрганизаций |
-```
-
-Без этого файла агент может ошибиться с именем объекта: например, спутать «подразделение» с несуществующим `Catalog_Подразделения`.
-
-Перечитывается при `/refresh`. Если файл отсутствует — игнорируется.
-
----
-
-## Структура файлов
-
-```
-bot/
-  bot.py            — основной код бота
-  master_prompt.md  — промпт форматирования ответов (шаг 2)
-  config_hint.md    — терминология конфигурации 1С (шаг 1)
-  README.md         — это описание
-```
-
-Кэш хранится в `.cache/` в корне проекта:
-
-```
-.cache/
-  metadata_summary.json       — список объектов 1С (TTL 1 час)
-  odata_metadata_<hash>.xml   — схема полей ($metadata)
-```
-
----
-
-## Логирование и отладка
-
-```bash
-# Подробный лог (все запросы к ИИ и OData):
-python bot/bot.py --log-level DEBUG
-
-# Уровни: DEBUG | INFO | WARNING | ERROR
-```
-
-В логах отображаются:
-- `OData GET: <url>` — URL каждого запроса к 1С
-- `Query: {...}` — JSON, сформированный ИИ на Шаге 1
-- `Fields for ...: [...]` — список полей из $metadata
-- Rate limiter: время ожидания между запросами к ИИ
-- Автоматические fallback при ошибках 400 (убирает `$select`, `$orderby`, `$filter`)
+- `/start` — приветствие, список агентов
+- `/status` — статус всех агентов
+- `/refresh` — обновить данные агентов (метаданные 1С)
+- Любой текст → маршрутизация агенту по умолчанию (odata)
