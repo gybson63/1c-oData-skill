@@ -4,6 +4,7 @@
 import argparse
 import base64
 import json
+import logging
 import os
 import sys
 import time
@@ -14,6 +15,8 @@ from xml.etree import ElementTree as ET
 
 sys.stdout.reconfigure(encoding="utf-8")
 sys.stderr.reconfigure(encoding="utf-8")
+
+logger = logging.getLogger(__name__)
 
 parser = argparse.ArgumentParser(description="Fetch 1C config info from OData $metadata")
 parser.add_argument("-EnvFile", default="env.json", help="Path to env.json with credentials")
@@ -82,12 +85,12 @@ if os.path.isfile(env_file):
     odata_user = profile.get("odata_user", "")
     odata_password = profile.get("odata_password", "")
 elif not odata_url:
-    print(f"[ERROR] env.json not found: {env_file}", file=sys.stderr)
-    print("        Provide -ODataUrl or ensure env.json exists", file=sys.stderr)
+    logger.error("env.json not found: %s", env_file)
+    logger.error("Provide -ODataUrl or ensure env.json exists")
     sys.exit(1)
 
 if not odata_url:
-    print("[ERROR] odata_url is not set", file=sys.stderr)
+    logger.error("odata_url is not set")
     sys.exit(1)
 
 metadata_url = odata_url + "/$metadata"
@@ -130,10 +133,10 @@ def fetch_metadata():
         with urllib.request.urlopen(req, timeout=30) as resp:
             return resp.read().decode("utf-8")
     except urllib.error.HTTPError as e:
-        print(f"[ERROR] HTTP {e.code} fetching {metadata_url}", file=sys.stderr)
+        logger.error("HTTP %s fetching %s", e.code, metadata_url)
         sys.exit(1)
     except urllib.error.URLError as e:
-        print(f"[ERROR] Cannot connect to {metadata_url}: {e.reason}", file=sys.stderr)
+        logger.error("Cannot connect to %s: %s", metadata_url, e.reason)
         sys.exit(1)
 
 # --- Get XML content (cache or network) ---
@@ -156,7 +159,7 @@ if xml_content is None:
 try:
     root = ET.fromstring(xml_content)
 except ET.ParseError as e:
-    print(f"[ERROR] Failed to parse XML: {e}", file=sys.stderr)
+    logger.error("Failed to parse XML: %s", e)
     sys.exit(1)
 
 # EDMX namespaces
@@ -188,7 +191,7 @@ if data_services is None:
 
 schema = find_ns(data_services, "Schema", NS_LIST)
 if schema is None:
-    print("[ERROR] No Schema element found in $metadata", file=sys.stderr)
+    logger.error("No Schema element found in $metadata")
     sys.exit(1)
 
 entity_container = find_ns(schema, "EntityContainer", NS_LIST)

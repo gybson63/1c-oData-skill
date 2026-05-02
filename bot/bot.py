@@ -34,6 +34,7 @@ from telegram.error import BadRequest, TimedOut
 from bot.agents.base import BaseAgent
 from bot.agents.odata import ODataAgent
 from bot.agents.formatter import FormatterAgent
+from bot.logging_config import setup_logging
 from bot.utils import RateLimiter, load_config, sanitize_telegram_html
 
 log = logging.getLogger(__name__)
@@ -321,13 +322,10 @@ def main() -> None:
     parser.add_argument("--profile", default="default")
     parser.add_argument("--cache-dir", default=str(_ROOT / ".cache"))
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+    parser.add_argument("--log-file", default=None, help="Путь к файлу лога (поворот 5 МБ)")
     args = parser.parse_args()
 
-    logging.basicConfig(
-        level=getattr(logging, args.log_level, logging.INFO),
-        format="%(asctime)s %(name)s %(levelname)s: %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    setup_logging(level=args.log_level, log_file=args.log_file)
 
     _env_file = args.env_file
     _cache_dir = args.cache_dir

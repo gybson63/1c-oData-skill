@@ -89,8 +89,8 @@ def _parse_entity_fields(xml_text: str, entity_name: str) -> list[str]:
                         if pname:
                             fields.append(pname)
                 break
-    except ET.ParseError:
-        pass
+    except ET.ParseError as e:
+        log.warning("Ошибка разбора XML при извлечении полей '%s': %s", entity_name, e)
     return fields
 
 
