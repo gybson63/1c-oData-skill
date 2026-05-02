@@ -31,6 +31,7 @@ class FormatterAgent(BaseAgent):
         self._model: str = ""
         self._rate_limiter: Optional[RateLimiter] = None
         self._enabled: bool = True
+        self._temperature: float = 0.2
 
     # -- lifecycle --
 
@@ -60,8 +61,10 @@ class FormatterAgent(BaseAgent):
         rpm = cfg.get("ai_rpm", 20)
         self._rate_limiter = RateLimiter(rpm=rpm)
 
+        self._temperature = cfg.get("temperature", 0.2)
+
         self._initialized = True
-        log.info("FormatterAgent инициализирован (model=%s)", self._model)
+        log.info("FormatterAgent инициализирован (model=%s, temperature=%s)", self._model, self._temperature)
 
     async def shutdown(self) -> None:
         self._initialized = False
@@ -117,7 +120,7 @@ class FormatterAgent(BaseAgent):
             resp = await self._ai_client.chat.completions.create(
                 model=self._model,
                 messages=messages,  # type: ignore[arg-type]
-                temperature=0.2,
+                temperature=self._temperature,
             )
             formatted = resp.choices[0].message.content or raw_answer
             log.info(

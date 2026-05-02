@@ -48,6 +48,12 @@ _history: dict[int, list[dict[str, str]]] = {}  # chat_id → messages
 _cache_dir: str = ".cache"
 _env_file: str = "env.json"
 
+# Настройки со значениями по умолчанию (переопределяются из env.json)
+_tg_message_max_length: int = 4000
+_tg_retry_count: int = 2
+_tg_retry_delay: int = 2
+_tg_polling_restart_delay: int = 5
+
 AGENT_REGISTRY: dict[str, type[BaseAgent]] = {
     "odata": ODataAgent,
     "formatter": FormatterAgent,
@@ -235,8 +241,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             log.warning("FormatterAgent: ошибка форматирования (%s), отправляю как есть", e)
 
     # Truncate (Telegram limit: 4096 chars)
-    if len(answer) > 4000:
-        answer = answer[:4000] + "... (сообщение сокращено)"
+    max_len = _tg_message_max_length
+    if len(answer) > max_len:
+        answer = answer[:max_len] + "... (сообщение сокращено)"
 
     # Санитизация HTML перед отправкой
     safe_answer = sanitize_telegram_html(answer)
@@ -250,17 +257,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             # Убрать все HTML-теги для plain-text варианта
             import re
             plain = re.sub(r"<[^>]+>", "", safe_answer)
-            if len(plain) > 4000:
-                plain = plain[:4000] + "... (сообщение сокращено)"
+            if len(plain) > max_len:
+                plain = plain[:max_len] + "... (сообщение сокращено)"
             await update.message.reply_text(plain)
         except Exception:
             log.error("Telegram не удалось отправить даже plain text")
     except TimedOut:
         # Ретри при таймауте
         sent = False
-        for attempt in range(2):
-            log.warning("Telegram reply_text TimedOut, retry %d/2", attempt + 1)
-            await asyncio.sleep(2)
+        for attempt in range(_tg_retry_count):
+            log.warning("Telegram reply_text TimedOut, retry %d/%d", attempt + 1, _tg_retry_count)
+            await asyncio.sleep(_tg_retry_delay)
             try:
                 await update.message.reply_text(safe_answer, parse_mode="HTML")
                 sent = True
@@ -306,6 +313,7 @@ async def post_shutdown(application) -> None:
 
 def main() -> None:
     global _cfg, _cache_dir, _env_file
+    global _tg_message_max_length, _tg_retry_count, _tg_retry_delay, _tg_polling_restart_delay
 
     _ROOT = Path(__file__).parent.parent
     parser = argparse.ArgumentParser(description="1С Telegram Bot (Multi-Agent)")
@@ -326,8 +334,19 @@ def main() -> None:
 
     _cfg = load_config(args.env_file, args.profile)
 
+    # Telegram-настройки из конфигурации
+    tg_cfg = _cfg.get("telegram", {})
+    _tg_message_max_length = tg_cfg.get("message_max_length", 4000)
+    _tg_retry_count = tg_cfg.get("retry_count", 2)
+    _tg_retry_delay = tg_cfg.get("retry_delay", 2)
+    _tg_polling_restart_delay = tg_cfg.get("polling_restart_delay", 5)
+
+    connect_timeout = tg_cfg.get("connect_timeout", 30)
+    read_timeout = tg_cfg.get("read_timeout", 120)
+    write_timeout = tg_cfg.get("write_timeout", 60)
+
     # Увеличенные таймауты для Telegram API (default ~10s слишком мало при долгой обработке)
-    request = HTTPXRequest(connect_timeout=30, read_timeout=120, write_timeout=60)
+    request = HTTPXRequest(connect_timeout=connect_timeout, read_timeout=read_timeout, write_timeout=write_timeout)
 
     app = (
         ApplicationBuilder()
@@ -351,7 +370,7 @@ def main() -> None:
         except (TimedOut, TimeoutError) as e:
             log.warning("Polling error (restart): %s", e)
             import time
-            time.sleep(5)
+            time.sleep(_tg_polling_restart_delay)
             continue
         break
 

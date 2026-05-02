@@ -30,12 +30,16 @@ async def execute_odata_query(
     top: int = 20,
     count: bool = False,
     expand: Optional[str] = None,
+    request_timeout: int = 60,
+    max_url_length: int = 2000,
 ) -> tuple[list[dict], int]:
     """Выполнить OData-запрос к 1С.
 
     Args:
         expand: список навигационных свойств через запятую для $expand
             (например "Сотрудник,Организация").
+        request_timeout: таймаут HTTP-запроса в секундах.
+        max_url_length: максимальная длина URL (превышение → обрезка $expand/$select).
 
     Returns:
         Кортеж (records, total_count):
@@ -49,7 +53,7 @@ async def execute_odata_query(
             params.append(("$filter", filter_expr))
         url_str = url + "?" + "&".join(f"{k}={quote(v, safe='')}" for k, v in params)
 
-        async with httpx.AsyncClient(verify=False, timeout=60) as client:
+        async with httpx.AsyncClient(verify=False, timeout=request_timeout) as client:
             resp = await client.get(url_str, headers={"Authorization": auth_header})
 
         if resp.status_code != 200:
@@ -78,13 +82,12 @@ async def execute_odata_query(
     url_str = url + "?" + "&".join(f"{k}={quote(v, safe='')}" for k, v in params)
 
     # Защита от слишком длинного URL (IIS 404.15)
-    MAX_URL_LEN = 2000
-    if len(url_str) > MAX_URL_LEN and expand:
+    if len(url_str) > max_url_length and expand:
         # Попробовать убрать $expand
-        log.warning("URL слишком длинный (%d > %d), убираем $expand", len(url_str), MAX_URL_LEN)
+        log.warning("URL слишком длинный (%d > %d), убираем $expand", len(url_str), max_url_length)
         params_no_expand = [(k, v) for k, v in params if k != "$expand"]
         url_str = url + "?" + "&".join(f"{k}={quote(v, safe='')}" for k, v in params_no_expand)
-        if len(url_str) > MAX_URL_LEN and select:
+        if len(url_str) > max_url_length and select:
             # Если всё ещё длинный — убрать и $select
             log.warning("URL всё ещё длинный (%d), убираем $select", len(url_str))
             params_no_select = [(k, v) for k, v in params_no_expand if k != "$select"]
@@ -92,7 +95,7 @@ async def execute_odata_query(
 
     log.info("OData GET: %s", url_str)
 
-    async with httpx.AsyncClient(verify=False, timeout=60) as client:
+    async with httpx.AsyncClient(verify=False, timeout=request_timeout) as client:
         resp = await client.get(url_str, headers={"Authorization": auth_header})
 
     if resp.status_code != 200:

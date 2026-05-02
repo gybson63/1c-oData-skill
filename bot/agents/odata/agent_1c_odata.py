@@ -31,7 +31,16 @@ from .prompts import (
 
 log = logging.getLogger(__name__)
 
-HISTORY_MAX_TURNS = 10
+# Значения по умолчанию (переопределяются из конфигурации)
+_DEFAULT_HISTORY_MAX_TURNS = 10
+_DEFAULT_DEFAULT_TOP = 20
+_DEFAULT_MAX_TOP = 50
+_DEFAULT_MAX_EXPAND_FIELDS = 15
+_DEFAULT_MAX_URL_LENGTH = 1800
+_DEFAULT_MAX_SAMPLE_RECORDS = 30
+_DEFAULT_MAX_DATA_LENGTH = 8000
+_DEFAULT_STEP1_TEMPERATURE = 0.1
+_DEFAULT_STEP2_TEMPERATURE = 0.3
 
 
 class QueryError(Exception):
@@ -55,6 +64,18 @@ class ODataAgent(BaseAgent):
         self._tools: list[dict] = []
         self._tools_map: dict[str, Any] = {}
         self._tools_supported: bool = True
+        # Настраиваемые параметры (из конфигурации)
+        self._history_max_turns: int = _DEFAULT_HISTORY_MAX_TURNS
+        self._default_top: int = _DEFAULT_DEFAULT_TOP
+        self._max_top: int = _DEFAULT_MAX_TOP
+        self._max_expand_fields: int = _DEFAULT_MAX_EXPAND_FIELDS
+        self._max_url_length: int = _DEFAULT_MAX_URL_LENGTH
+        self._max_sample_records: int = _DEFAULT_MAX_SAMPLE_RECORDS
+        self._max_data_length: int = _DEFAULT_MAX_DATA_LENGTH
+        self._step1_temperature: float = _DEFAULT_STEP1_TEMPERATURE
+        self._step2_temperature: float = _DEFAULT_STEP2_TEMPERATURE
+        self._request_timeout: int = 60
+        self._metadata_cache_seconds: int = 86400
 
     # -- helpers --
 
@@ -75,7 +96,7 @@ class ODataAgent(BaseAgent):
     ) -> None:
         self._cfg = {**global_config, **agent_config}
         self._model = self._cfg.get("ai_model", "gpt-4o-mini")
-        self._metadata = MetadataCache(cache_dir)
+        self._metadata = MetadataCache(cache_dir, cache_seconds=self._metadata_cache_seconds)
 
         # AI client
         self._ai_client = AsyncOpenAI(
@@ -87,6 +108,20 @@ class ODataAgent(BaseAgent):
         # Rate limiter
         rpm = self._cfg.get("ai_rpm", 20)
         self._rate_limiter = RateLimiter(rpm=rpm)
+
+        # Настраиваемые параметры OData
+        odata_cfg = self._cfg.get("odata", {})
+        self._history_max_turns = self._cfg.get("history_max_turns", _DEFAULT_HISTORY_MAX_TURNS)
+        self._default_top = odata_cfg.get("default_top", _DEFAULT_DEFAULT_TOP)
+        self._max_top = odata_cfg.get("max_top", _DEFAULT_MAX_TOP)
+        self._max_expand_fields = odata_cfg.get("max_expand_fields", _DEFAULT_MAX_EXPAND_FIELDS)
+        self._max_url_length = odata_cfg.get("max_url_length", _DEFAULT_MAX_URL_LENGTH)
+        self._request_timeout = odata_cfg.get("request_timeout", 60)
+        self._max_sample_records = odata_cfg.get("max_sample_records", _DEFAULT_MAX_SAMPLE_RECORDS)
+        self._max_data_length = odata_cfg.get("max_data_length", _DEFAULT_MAX_DATA_LENGTH)
+        self._step1_temperature = self._cfg.get("ai_temperature", _DEFAULT_STEP1_TEMPERATURE)
+        self._step2_temperature = self._cfg.get("ai_temperature_step2", _DEFAULT_STEP2_TEMPERATURE)
+        self._metadata_cache_seconds = odata_cfg.get("metadata_cache_seconds", 86400)
 
         # MCP
         mcp_config = agent_config.get("mcp_servers", {})
@@ -128,7 +163,7 @@ class ODataAgent(BaseAgent):
     async def _load_metadata(self, force: bool = False) -> None:
         if not force and self._metadata.is_loaded:
             return
-        xml = await fetch_metadata_from_server(self._cfg["odata_url"], self._auth_header())
+        xml = await fetch_metadata_from_server(self._cfg["odata_url"], self._auth_header(), timeout=self._request_timeout)
         if xml:
             self._metadata.parse_and_store(xml)
         else:
@@ -160,18 +195,18 @@ class ODataAgent(BaseAgent):
                 answer = f"❌ <b>Не удалось подключиться к 1С:</b> {esc_html(str(e))}"
             history.append({"role": "user", "content": user_text})
             history.append({"role": "assistant", "content": answer})
-            return answer, history[-(HISTORY_MAX_TURNS * 2):]
+            return answer, history[-(self._history_max_turns * 2):]
         except QueryError as e:
             answer = f"⚠️ {esc_html(str(e))}"
             history.append({"role": "user", "content": user_text})
             history.append({"role": "assistant", "content": answer})
-            return answer, history[-(HISTORY_MAX_TURNS * 2):]
+            return answer, history[-(self._history_max_turns * 2):]
         except Exception:
             log.exception("Unexpected error in ODataAgent")
             answer = "💥 Произошла непредвиденная ошибка. Попробуйте позже."
             history.append({"role": "user", "content": user_text})
             history.append({"role": "assistant", "content": answer})
-            return answer, history[-(HISTORY_MAX_TURNS * 2):]
+            return answer, history[-(self._history_max_turns * 2):]
 
     def _is_tool_use_error(self, exc: BadRequestError) -> bool:
         """Проверить, связана ли ошибка с отсутствием поддержки tool use."""
@@ -198,7 +233,7 @@ class ODataAgent(BaseAgent):
         kwargs: dict[str, Any] = {
             "model": self._model,
             "messages": messages,  # type: ignore[arg-type]
-            "temperature": 0.1,
+            "temperature": self._step1_temperature,
         }
         if use_tools and self._tools:
             kwargs["tools"] = self._tools
@@ -314,6 +349,7 @@ class ODataAgent(BaseAgent):
                 entity=entity,
                 filter_expr=query.get("filter"),
                 count=True,
+                request_timeout=self._request_timeout,
             )
             answer = f"<b>📊 Количество</b> <i>{esc_html(entity)}</i>: <code>{total}</code>"
             if query.get("explanation"):
@@ -321,10 +357,10 @@ class ODataAgent(BaseAgent):
 
             history.append({"role": "user", "content": user_text})
             history.append({"role": "assistant", "content": json.dumps({"entity": entity, "filter": query.get("filter"), "count": True, "explanation": query.get("explanation", "")}, ensure_ascii=False)})
-            return answer, history[-(HISTORY_MAX_TURNS * 2):]
+            return answer, history[-(self._history_max_turns * 2):]
 
         # ---- Обычный запрос ----
-        top = min(int(query.get("top") or 20), 50)
+        top = min(int(query.get("top") or self._default_top), self._max_top)
 
         # Валидация $select
         select = query.get("select")
@@ -369,6 +405,7 @@ class ODataAgent(BaseAgent):
             orderby=orderby,
             top=top,
             expand=expand,
+            request_timeout=self._request_timeout,
         )
 
         # Fallback: если 0 записей и фильтр содержит Number + любую дату — попробовать только Number
@@ -389,6 +426,7 @@ class ODataAgent(BaseAgent):
                     orderby=orderby,
                     top=top,
                     expand=expand,
+                    request_timeout=self._request_timeout,
                 )
 
         # Fallback 2: если всё ещё 0 и Number с eq — попробовать substringof (OData v3)
@@ -410,6 +448,7 @@ class ODataAgent(BaseAgent):
                         orderby=orderby,
                         top=top,
                         expand=expand,
+                        request_timeout=self._request_timeout,
                     )
 
         # ---- Шаг 2: AI форматирует ответ ----
@@ -417,7 +456,7 @@ class ODataAgent(BaseAgent):
 
         history.append({"role": "user", "content": user_text})
         history.append({"role": "assistant", "content": json.dumps({"entity": entity, "filter": query.get("filter"), "select": query.get("select"), "explanation": query.get("explanation", "")}, ensure_ascii=False)})
-        return answer, history[-(HISTORY_MAX_TURNS * 2):]
+        return answer, history[-(self._history_max_turns * 2):]
 
     def _handle_tool_call(self, name: str, args: dict) -> str:
         """Обработка вызова инструмента (function calling)."""
@@ -471,11 +510,6 @@ class ODataAgent(BaseAgent):
         except json.JSONDecodeError:
             return None
 
-    # Максимальное количество навигационных свойств в $expand
-    MAX_EXPAND_FIELDS = 15
-
-    # Максимальная длина URL (IIS по умолчанию ~2048, берём с запасом)
-    MAX_URL_LENGTH = 1800
 
     # Приоритеты раскрытия ссылочных полей через $expand.
     # Поля с высоким приоритетом (бизнес-суть) раскрываются первыми,
@@ -550,12 +584,12 @@ class ODataAgent(BaseAgent):
         nav_names.sort(key=self._expand_priority)
 
         # Ограничить количество expand-свойств (с учётом приоритета)
-        if len(nav_names) > self.MAX_EXPAND_FIELDS:
+        if len(nav_names) > self._max_expand_fields:
             log.info(
                 "$expand для %s: %d свойств → ограничено до %d (с приоритетом)",
-                entity, len(nav_names), self.MAX_EXPAND_FIELDS,
+                entity, len(nav_names), self._max_expand_fields,
             )
-            nav_names = nav_names[:self.MAX_EXPAND_FIELDS]
+            nav_names = nav_names[:self._max_expand_fields]
 
         expand = ",".join(nav_names)
         log.info("Auto $expand for %s: %s (from fields: %s)", entity, expand, field_names[:20])
@@ -608,7 +642,7 @@ class ODataAgent(BaseAgent):
         current_url_len = self._estimate_url_length(
             odata_url, entity, filter_expr, select, orderby, top, expand,
         )
-        if current_url_len <= self.MAX_URL_LENGTH:
+        if current_url_len <= self._max_url_length:
             return expand
 
         # Прогрессивно сокращаем expand
@@ -619,7 +653,7 @@ class ODataAgent(BaseAgent):
             current_url_len = self._estimate_url_length(
                 odata_url, entity, filter_expr, select, orderby, top, trimmed,
             )
-            if current_url_len <= self.MAX_URL_LENGTH:
+            if current_url_len <= self._max_url_length:
                 log.info(
                     "$expand сокращён: %d → %d свойств (URL %d → %d)",
                     len(expand.split(",")), len(nav_list),
@@ -696,10 +730,10 @@ class ODataAgent(BaseAgent):
     ) -> str:
         """Шаг 2: AI форматирует записи в HTML-ответ для Telegram."""
         resolved = self._resolve_references(records)
-        sample = resolved[:30]
+        sample = resolved[:self._max_sample_records]
         data_str = json.dumps(sample, ensure_ascii=False, indent=2)
-        if len(data_str) > 8000:
-            data_str = data_str[:8000] + "\n... (данные сокращены)"
+        if len(data_str) > self._max_data_length:
+            data_str = data_str[:self._max_data_length] + "\n... (данные сокращены)"
 
         messages = [
             {"role": "system", "content": STEP2_SYSTEM},
@@ -712,7 +746,7 @@ class ODataAgent(BaseAgent):
         resp = await self._ai_client.chat.completions.create(
             model=self._model,
             messages=messages,  # type: ignore[arg-type]
-            temperature=0.3,
+            temperature=self._step2_temperature,
         )
         return resp.choices[0].message.content or "Не удалось сформировать ответ."
 

@@ -18,7 +18,7 @@ import httpx
 log = logging.getLogger(__name__)
 
 METADATA_FILE = "metadata_cache.json"
-METADATA_CACHE_SECONDS = 86400  # 24 часа
+DEFAULT_METADATA_CACHE_SECONDS = 86400  # 24 часа
 
 
 # ---------------------------------------------------------------------------
@@ -94,11 +94,11 @@ def _parse_entity_fields(xml_text: str, entity_name: str) -> list[str]:
     return fields
 
 
-async def fetch_metadata_from_server(odata_url: str, auth_header: str) -> str | None:
+async def fetch_metadata_from_server(odata_url: str, auth_header: str, timeout: int = 30) -> str | None:
     """Загрузить $metadata с сервера 1С."""
     meta_url = odata_url.rstrip("/") + "/$metadata"
     try:
-        async with httpx.AsyncClient(verify=False, timeout=30) as client:
+        async with httpx.AsyncClient(verify=False, timeout=timeout) as client:
             resp = await client.get(meta_url, headers={"Authorization": auth_header})
             resp.raise_for_status()
             return resp.text
@@ -114,9 +114,10 @@ async def fetch_metadata_from_server(odata_url: str, auth_header: str) -> str | 
 class MetadataCache:
     """Кэш сущностей и полей 1С OData."""
 
-    def __init__(self, cache_dir: str = ".cache") -> None:
+    def __init__(self, cache_dir: str = ".cache", cache_seconds: int = DEFAULT_METADATA_CACHE_SECONDS) -> None:
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self._cache_seconds = cache_seconds
         self._entities: list[dict] = []
         self._xml_raw: str = ""
         self._loaded_at: float = 0
@@ -134,7 +135,7 @@ class MetadataCache:
         try:
             data = json.loads(p.read_text("utf-8"))
             ts = data.get("timestamp", 0)
-            if time.time() - ts > METADATA_CACHE_SECONDS:
+            if time.time() - ts > self._cache_seconds:
                 log.info("Кэш метаданных устарел (%.0f ч)", (time.time() - ts) / 3600)
                 return False
             self._entities = data.get("entities", [])
