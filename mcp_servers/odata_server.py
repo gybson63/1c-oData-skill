@@ -5,9 +5,11 @@
 к OData-эндпоинту 1С:Предприятие с Basic-авторизацией.
 
 Переменные окружения:
-  ODATA_URL      — базовый URL OData (например http://localhost/zup/odata/standard.odata)
-  ODATA_USER     — логин пользователя 1С
-  ODATA_PASSWORD — пароль пользователя 1С
+  ODATA_URL            — базовый URL OData (например http://localhost/zup/odata/standard.odata)
+  ODATA_USER           — логин пользователя 1С
+  ODATA_PASSWORD       — пароль пользователя 1С
+  ODATA_TIMEOUT        — таймаут HTTP-запроса, сек (по умолчанию 30)
+  ODATA_CONNECT_TIMEOUT — таймаут подключения, сек (по умолчанию 10)
 
 Запуск:
   python mcp_servers/odata_server.py
@@ -39,6 +41,8 @@ log = logging.getLogger("1c-odata-mcp")
 ODATA_URL = os.environ.get("ODATA_URL", "").rstrip("/")
 ODATA_USER = os.environ.get("ODATA_USER", "")
 ODATA_PASSWORD = os.environ.get("ODATA_PASSWORD", "")
+ODATA_TIMEOUT = float(os.environ.get("ODATA_TIMEOUT", "30"))
+ODATA_CONNECT_TIMEOUT = float(os.environ.get("ODATA_CONNECT_TIMEOUT", "10"))
 
 if not ODATA_URL:
     log.warning("ODATA_URL не задан — запросы не будут работать")
@@ -127,7 +131,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> CallToolResult:
 
     try:
         async with httpx.AsyncClient(
-            timeout=httpx.Timeout(30.0, connect=10.0),
+            timeout=httpx.Timeout(ODATA_TIMEOUT, connect=ODATA_CONNECT_TIMEOUT),
             follow_redirects=True,
             verify=False,  # 1C self-signed certs
         ) as client:
