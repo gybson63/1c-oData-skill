@@ -57,3 +57,42 @@ def load_config(env_file: str, profile: str = "default") -> dict[str, Any]:
 def esc_html(text: str) -> str:
     """Экранирование HTML-спецсимволов для Telegram."""
     return text.replace("&", "\x26amp;").replace("<", "\x26lt;").replace(">", "\x26gt;")
+
+
+# Теги, поддерживаемые Telegram HTML
+_TELEGRAM_TAGS = {"b", "i", "code", "pre", "a", "s", "u", "tg-spoiler", "blockquote", "tg-emoji"}
+
+
+def sanitize_telegram_html(text: str) -> str:
+    """Очистить HTML для Telegram: оставить только поддерживаемые теги,
+    экранировать спецсимволы вне тегов.
+
+    Telegram поддерживает: b, i, code, pre, a, s, u,
+    tg-spoiler, blockquote, tg-emoji.
+    """
+    import html as _html
+    import re
+
+    # Разбить текст на «теги» и «текст между тегами»
+    parts: list[str] = []
+    last_end = 0
+
+    for m in re.finditer(r"<(/?)(\w[\w-]*)([^>]*)>", text):
+        # Текст перед тегом — экранируем через stdlib
+        if m.start() > last_end:
+            raw = text[last_end : m.start()]
+            parts.append(_html.escape(raw))
+
+        slash, tag, attrs = m.group(1), m.group(2).lower(), m.group(3)
+        if tag in _TELEGRAM_TAGS:
+            # Оставляем допустимый тег (с атрибутами или без)
+            parts.append(f"<{slash}{tag}{attrs}>")
+        # Недопустимый тег — просто убираем, содержимое сохранится
+
+        last_end = m.end()
+
+    # Хвост после последнего тега
+    if last_end < len(text):
+        parts.append(_html.escape(text[last_end:]))
+
+    return "".join(parts)

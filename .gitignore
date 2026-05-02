@@ -7,3 +7,24 @@ view-source_https___infostart.ru_public_edit_.html
 .cache/metadata_summary.json
 .cache/odata_metadata_2cfb9736.xml
 bot/__pycache__/bot.cpython-312.pyc
+tmp_ir.txt
+tmp_meta.txt
+bot/__pycache__/mcp_client.cpython-312.pyc
+docs/конструктор_odata.bsl
+mcp_servers/__pycache__/odata_server.cpython-312.pyc
+env — копия.json
+.cache/metadata_cache.json
+bot/agents/odata/__pycache__/prompts.cpython-312.pyc
+bot/agents/odata/__pycache__/metadata.cpython-312.pyc
+bot/__pycache__/__init__.cpython-312.pyc
+bot/__pycache__/__main__.cpython-312.pyc
+bot/__pycache__/utils.cpython-312.pyc
+bot/agents/__pycache__/__init__.cpython-312.pyc
+bot/agents/__pycache__/base.cpython-312.pyc
+bot/agents/odata/__pycache__/__init__.cpython-312.pyc
+bot/agents/odata/__pycache__/agent.cpython-312.pyc
+bot/agents/odata/__pycache__/odata_http.cpython-312.pyc
+bot/agents/formatter/__pycache__/__init__.cpython-312.pyc
+bot/agents/formatter/__pycache__/agent_formatter.cpython-312.pyc
+bot/agents/formatter/__pycache__/prompts.cpython-312.pyc
+bot/agents/odata/__pycache__/agent_1c_odata.cpython-312.pyc

@@ -29,8 +29,13 @@ async def execute_odata_query(
     orderby: Optional[str] = None,
     top: int = 20,
     count: bool = False,
+    expand: Optional[str] = None,
 ) -> tuple[list[dict], int]:
     """Выполнить OData-запрос к 1С.
+
+    Args:
+        expand: список навигационных свойств через запятую для $expand
+            (например "Сотрудник,Организация").
 
     Returns:
         Кортеж (records, total_count):
@@ -66,8 +71,25 @@ async def execute_odata_query(
         params.append(("$orderby", raw))
     if top:
         params.append(("$top", str(top)))
+    if expand:
+        raw_expand = expand[len("$expand="):] if expand.startswith("$expand=") else expand
+        params.append(("$expand", raw_expand))
 
     url_str = url + "?" + "&".join(f"{k}={quote(v, safe='')}" for k, v in params)
+
+    # Защита от слишком длинного URL (IIS 404.15)
+    MAX_URL_LEN = 2000
+    if len(url_str) > MAX_URL_LEN and expand:
+        # Попробовать убрать $expand
+        log.warning("URL слишком длинный (%d > %d), убираем $expand", len(url_str), MAX_URL_LEN)
+        params_no_expand = [(k, v) for k, v in params if k != "$expand"]
+        url_str = url + "?" + "&".join(f"{k}={quote(v, safe='')}" for k, v in params_no_expand)
+        if len(url_str) > MAX_URL_LEN and select:
+            # Если всё ещё длинный — убрать и $select
+            log.warning("URL всё ещё длинный (%d), убираем $select", len(url_str))
+            params_no_select = [(k, v) for k, v in params_no_expand if k != "$select"]
+            url_str = url + "?" + "&".join(f"{k}={quote(v, safe='')}" for k, v in params_no_select)
+
     log.info("OData GET: %s", url_str)
 
     async with httpx.AsyncClient(verify=False, timeout=60) as client:
@@ -82,5 +104,12 @@ async def execute_odata_query(
     # Попробуем извлечь inline count
     total_str = data.get("odata.count")
     total = int(total_str) if total_str else len(records)
+
+    log.info("OData response: status=%d, records=%d, total=%s", resp.status_code, len(records), total)
+    if records:
+        import json
+        log.info("OData first record keys: %s", list(records[0].keys())[:10])
+    else:
+        log.warning("OData вернул 0 записей. Полный ответ: %s", resp.text[:500])
 
     return records, total

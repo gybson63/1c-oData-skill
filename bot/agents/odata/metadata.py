@@ -25,30 +25,50 @@ METADATA_CACHE_SECONDS = 86400  # 24 часа
 # Загрузка $metadata
 # ---------------------------------------------------------------------------
 
+def _iter_entity_types(root: ET.Element):
+    """Итератор по всем EntityType из $metadata (поддержка разных namespace)."""
+    # Known EDM namespaces used by 1C OData
+    edm_namespaces = [
+        "http://schemas.microsoft.com/ado/2008/09/edm",
+        "http://schemas.microsoft.com/ado/2009/11/edm",
+    ]
+    for ns in edm_namespaces:
+        ns_tag = f"{{{ns}}}EntityType"
+        found = False
+        for etype in root.iter(ns_tag):
+            found = True
+            yield etype
+        if found:
+            return  # первый совпавший namespace используем
+    # Fallback: искать EntityType без namespace
+    for etype in root.iter("EntityType"):
+        yield etype
+
+
+def _iter_properties(etype: ET.Element):
+    """Итератор по Property внутри EntityType (любой namespace)."""
+    for child in etype:
+        tag = child.tag
+        # Извлечь локальное имя тега без namespace
+        local = tag.split("}")[-1] if "}" in tag else tag
+        if local == "Property":
+            yield child
+
+
 def _parse_metadata_xml(xml_text: str) -> list[dict]:
     """Разбор XML $metadata → список {'name':..., 'label':...}."""
     entities: list[dict] = []
     try:
         root = ET.fromstring(xml_text)
-        ns = {"edmx": "http://schemas.microsoft.com/ado/2007/06/edmx",
-              "m": "http://schemas.microsoft.com/ado/2007/08/dataservices/metadata",
-              "d": "http://schemas.microsoft.com/ado/2008/09/edm"}
-
-        schemas = root.findall(".//edmx:DataServices/d:Schema", ns)
-        if not schemas:
-            schemas = root.findall(".//{http://schemas.microsoft.com/ado/2008/09/edm}Schema")
-        for schema in schemas:
-            for etype in schema.findall("d:EntityType", ns) if schemas else schema.findall(
-                    "{http://schemas.microsoft.com/ado/2008/09/edm}EntityType"):
-                name = etype.get("Name", "")
-                label = ""
-                for prop in etype.findall("d:Property", ns) if schemas else etype.findall(
-                        "{http://schemas.microsoft.com/ado/2008/09/edm}Property"):
-                    pname = prop.get("Name", "")
-                    if pname == "Description":
-                        label = f"  (имеет Description)"
-                        break
-                entities.append({"name": name, "label": label})
+        for etype in _iter_entity_types(root):
+            name = etype.get("Name", "")
+            label = ""
+            for prop in _iter_properties(etype):
+                pname = prop.get("Name", "")
+                if pname == "Description":
+                    label = f"  (имеет Description)"
+                    break
+            entities.append({"name": name, "label": label})
     except ET.ParseError as e:
         log.error("Ошибка разбора $metadata: %s", e)
     return entities
@@ -59,19 +79,16 @@ def _parse_entity_fields(xml_text: str, entity_name: str) -> list[str]:
     fields: list[str] = []
     try:
         root = ET.fromstring(xml_text)
-        ns_d = "http://schemas.microsoft.com/ado/2008/09/edm"
-        for schema in root.iter(f"{{{ns_d}}}Schema"):
-            for etype in schema.findall(f"{{{ns_d}}}EntityType"):
-                if etype.get("Name") == entity_name:
-                    for prop in etype.findall(f"{{{ns_d}}}Property"):
-                        pname = prop.get("Name")
+        for etype in _iter_entity_types(root):
+            if etype.get("Name") == entity_name:
+                for child in etype:
+                    tag = child.tag
+                    local = tag.split("}")[-1] if "}" in tag else tag
+                    if local in ("Property", "NavigationProperty"):
+                        pname = child.get("Name")
                         if pname:
                             fields.append(pname)
-                    for nav in etype.findall(f"{{{ns_d}}}NavigationProperty"):
-                        nname = nav.get("Name")
-                        if nname:
-                            fields.append(nname)
-                    break
+                break
     except ET.ParseError:
         pass
     return fields
@@ -162,14 +179,73 @@ class MetadataCache:
             return []
         return _parse_entity_fields(self._xml_raw, entity_name)
 
-    def format_entity_list(self) -> str:
-        """Форматировать список сущностей для промпта."""
+    # Префиксы типов объектов 1С для подсказки в промпте
+    _TYPE_PREFIXES = [
+        "Catalog_", "Document_", "InformationRegister_",
+        "AccumulationRegister_", "ChartOfAccounts_",
+        "ChartOfCharacteristicTypes_", "ChartOfCalculationTypes_",
+        "Processing_", "Report_", "Enum_", "Task_",
+        "Sequence_", "ExchangePlan_",
+    ]
+
+    def search_entities(self, query: str, top: int = 20) -> list[str]:
+        """Нечёткий поиск сущностей по ключевому слову.
+
+        Ищет вхождение query (case-insensitive) в имя сущности.
+        Если query пустой — возвращает все имена (до top).
+        """
         if not self._entities:
-            return "(метаданные не загружены — используйте /refresh)"
-        lines: list[str] = []
+            return []
+        q_lower = query.lower().strip()
+        results: list[str] = []
+        # Приоритет 1: точное вхождение query в имя
         for e in self._entities:
             name = e["name"]
-            lines.append(f"  - {name}")
+            if q_lower and q_lower in name.lower():
+                results.append(name)
+                if len(results) >= top:
+                    return results
+        # Приоритет 2: если ничего не найдено — попробовать без префикса типа
+        if not results and "_" in q_lower:
+            # "Document_Увольнение" → "Увольнение"
+            short = q_lower.split("_", 1)[-1]
+            if short != q_lower:
+                return self.search_entities(short, top=top)
+        return results
+
+    def format_entity_list(self) -> str:
+        """Форматировать список сущностей для промпта.
+
+        Если сущностей много (>200), выводит только сводку по типам
+        и подсказку использовать search_entities.
+        """
+        if not self._entities:
+            return "(метаданные не загружены — используйте /refresh)"
+
+        total = len(self._entities)
+        if total <= 200:
+            # Маленькая конфигурация — покажем всё
+            lines: list[str] = []
+            for e in self._entities:
+                name = e["name"]
+                lines.append(f"  - {name}")
+            return "\n".join(lines)
+
+        # Большая конфигурация — сводка по типам
+        type_counts: dict[str, int] = {}
+        for e in self._entities:
+            name = e["name"]
+            prefix = name.split("_")[0] + "_" if "_" in name else name
+            type_counts[prefix] = type_counts.get(prefix, 0) + 1
+
+        lines = [f"  Всего сущностей: {total}"]
+        lines.append("  Типы объектов:")
+        for prefix, count in sorted(type_counts.items()):
+            lines.append(f"    {prefix}... — {count} шт.")
+        lines.append("")
+        lines.append("  ⚠️ Список слишком большой для отображения.")
+        lines.append("  Используй инструмент search_entities(query='ключевое слово') для поиска нужной сущности.")
+        lines.append("  Примеры: search_entities(query='Увольнение'), search_entities(query='Document_Увольнение')")
         return "\n".join(lines)
 
     @property
