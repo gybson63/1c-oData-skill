@@ -24,3 +24,7 @@ bot/agents/__pycache__/base.cpython-312.pyc
 bot/agents/odata/__pycache__/__init__.cpython-312.pyc
 bot/agents/odata/__pycache__/agent.cpython-312.pyc
 bot/agents/odata/__pycache__/odata_http.cpython-312.pyc
+bot/agents/formatter/__pycache__/__init__.cpython-312.pyc
+bot/agents/formatter/__pycache__/agent_formatter.cpython-312.pyc
+bot/agents/formatter/__pycache__/prompts.cpython-312.pyc
+bot/agents/odata/__pycache__/agent_1c_odata.cpython-312.pyc
