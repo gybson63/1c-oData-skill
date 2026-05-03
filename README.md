@@ -17,6 +17,9 @@
 - Агент-форматтер: отдельный агент для красивого HTML-оформления ответов в Telegram
 - MCP-клиент: подключение внешних MCP-серверов (stdio / SSE)
 - Автоматический фоллбэк при отсутствии поддержки tool use у модели
+- **Structured logging** — JSON-логи в файл, человекочитаемые в консоль, ротация по дате
+- **Метрики** — счётчики, таймеры, трекинг AI-затрат с персистентной записью в JSONL
+- **Cost Analyzer** — агрегация затрат на AI по часам/дням/неделям
 - Файл `bot/config_hint.md` — описание терминологии вашей конфигурации (ЗУП, ERP, УТ и т.д.)
 
 Подробное описание архитектуры, настройка и конфигурация — в [`bot/README.md`](bot/README.md).
@@ -219,6 +222,10 @@ bot/
   __init__.py                 — пакет
   __main__.py                 — точка входа (python -m bot)
   bot.py                      — Telegram handlers + роутер агентов
+  config.py                   — Pydantic Settings конфигурация
+  logging_config.py           — Structured logging (JSON в файл, текст в консоль)
+  metrics.py                  — Метрики, CostLogger, CostAnalyzer
+  history.py                  — Управление историей диалогов
   utils.py                    — утилиты (RateLimiter, load_config, esc_html)
   mcp_client.py               — MCP-клиент (stdio / SSE транспорты)
   master_prompt.md            — промпт форматирования ответов
@@ -236,9 +243,18 @@ bot/
       prompts.py              — промпт форматтера
 bot_lib/
   __init__.py
-  exceptions.py
-  metadata_parser.py
-  odata_client.py
+  exceptions.py               — Иерархия типизированных исключений
+  metadata_parser.py          — Парсинг $metadata XML
+  odata_client.py             — Асинхронный HTTP-клиент OData с retry
+logs/                         — Логи бота (автосоздание)
+  costs/                      — JSONL-файлы AI-затрат по дням
+tests/
+  conftest.py                 — Общие фикстуры
+  test_config.py              — Тесты конфигурации
+  test_logging_config.py      — Тесты structured logging
+  test_metrics.py             — Тесты метрик и CostAnalyzer
+  test_metadata_parser.py     — Тесты парсинга метаданных
+  test_odata_client.py        — Тесты OData HTTP-клиента
 mcp_servers/
   odata_server.py             — MCP-сервер для 1С OData API
 skills/
