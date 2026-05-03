@@ -287,7 +287,18 @@ class ODataAgent(BaseAgent):
         """Построить системный промпт для Шага 1 (с учетом поддержки инструментов)."""
         base = STEP1_SYSTEM.format(metadata=self._metadata.format_entity_list())
         if not self._tools_supported:
-            ref_lines = ["\n\n--- СПРАВОЧНИК ODATA (инструменты недоступны, используй напрямую) ---"]
+            ref_lines = [
+                "\n\n--- СПРАВОЧНИК ODATA (инструменты недоступны через function calling, используй текстовый вызов) ---",
+                "⚠️ Инструменты НЕ доступны через function calling. Вызывай их текстом:",
+                "  search_entities(query='Организации')",
+                "  get_entity_fields(entity_name='Catalog_Организации')",
+                "  odata_reference(topic='filter')",
+                "Система распознает текстовый вызов, выполнит его и автоматически повторит запрос с результатом.",
+                "После получения результата — ТОЛЬКО JSON с entity/filter/select, без рассуждений!",
+                "",
+                "Если ты УВЕРЕН(А) в имени сущности (видишь точное совпадение в списке доступных объектов),",
+                "используй его напрямую без вызова инструмента.",
+            ]
             for topic, text in ODATA_REFERENCE.items():
                 ref_lines.append(f"\n[{topic}]\n{text}")
             base += "\n".join(ref_lines)
@@ -439,6 +450,159 @@ class ODataAgent(BaseAgent):
             )
         return query
 
+    # -- text tool call parsing (for models without function calling) --
+
+    # Regex для распознавания текстовых вызовов инструментов:
+    #   search_entities(query='Организации')
+    #   get_entity_fields(entity_name='Catalog_Организации')
+    #   odata_reference(topic='filter')
+    _TEXT_TOOL_RE = re.compile(
+        r'\b(search_entities|get_entity_fields|odata_reference)\s*\(\s*'
+        r'(\w+)\s*=\s*[\'"]([^\'"]*)[\'"]'
+        r'\s*\)'
+    )
+
+    @classmethod
+    def _parse_text_tool_call(cls, text: str) -> Optional[tuple[str, dict]]:
+        """Распознать текстовый вызов инструмента в ответе AI.
+
+        Поддерживаемые форматы::
+            search_entities(query='Организации')
+            get_entity_fields(entity_name='Catalog_Организации')
+            odata_reference(topic='filter')
+
+        Returns:
+            Кортеж (tool_name, args_dict) или None.
+        """
+        # Ищем все вызовы, берём первый
+        for match in cls._TEXT_TOOL_RE.finditer(text):
+            tool_name = match.group(1)
+            param_name = match.group(2)
+            param_value = match.group(3)
+            if tool_name in cls._TOOL_NAMES:
+                log.info("Распознан текстовый вызов инструмента: %s(%s='%s')", tool_name, param_name, param_value)
+                return tool_name, {param_name: param_value}
+        return None
+
+    @classmethod
+    def _has_text_tool_call(cls, text: str) -> bool:
+        """Проверить, содержит ли текст вызов инструмента в текстовом формате."""
+        return bool(cls._TEXT_TOOL_RE.search(text))
+
+    async def _resolve_text_tool_call(
+        self,
+        messages: list[dict],
+        tool_name: str,
+        tool_args: dict,
+        user_text: str,
+    ) -> dict:
+        """Обработать текстовый вызов инструмента и повторить запрос к AI.
+
+        Args:
+            messages: текущая история сообщений.
+            tool_name: имя инструмента (search_entities, get_entity_fields, odata_reference).
+            tool_args: аргументы инструмента.
+            user_text: оригинальный текст пользователя.
+
+        Returns:
+            Распарсенный OData-запрос (dict с entity/filter/...).
+        """
+        log.warning("Обработка текстового tool call: %s(%s)", tool_name, tool_args)
+
+        # Выполнить инструмент
+        result = self._handle_tool_call(tool_name, tool_args)
+        log.info("Text tool result: %s", result[:500] if result else "")
+
+        # Добавить результат инструмента в контекст и повторить запрос
+        tool_msg = (
+            f"[Результат инструмента {tool_name}({tool_args})]: {result}\n\n"
+            f"Теперь СРАЗУ построй OData-запрос JSON для: {user_text}\n"
+            f"⚠️ ТОЛЬКО JSON, без рассуждений и без вызовов инструментов!"
+        )
+        messages.append({"role": "assistant", "content": f"{tool_name}({tool_args})"})
+        messages.append({"role": "user", "content": tool_msg})
+
+        if self._rate_limiter:
+            await self._rate_limiter.wait()
+
+        resp = await self._step1_call_ai(messages, use_tools=False)
+        content = resp.choices[0].message.content or ""
+
+        # Обработать возможные tool_calls от повторного запроса (маловероятно, но возможно)
+        msg = resp.choices[0].message
+        if msg.tool_calls:
+            msg = await self._resolve_tool_calls(messages, msg)
+            content = msg.content or ""
+
+        query = self._extract_json(content)
+        if not query:
+            raise QueryError(
+                f"Не удалось разобрать запрос после вызова инструмента.\n\n"
+                f"<pre>{esc_html(content[:500])}</pre>"
+            )
+        return query
+
+    def _guess_entity_from_text(self, content: str, user_text: str) -> Optional[str]:
+        """Попытаться извлечь ключевое слово для поиска сущности из текста.
+
+        Используется как последний fallback, когда модель написала рассуждения
+        вместо JSON и не вызвала инструмент даже текстом.
+        """
+        # Убираем распространённые стоп-слова и берём существительное
+        stop_words = {
+            "покажи", "показать", "список", "все", "всех", "дай", "дайте",
+            "найди", "найти", "выведи", "получить", "сколько", "какие",
+            "какой", "какая", "где", "кто", "что", "это", "мне", "нам",
+            "можно", "нужно", "хочу", "посмотри", "посмотреть", "и", "в",
+            "на", "из", "за", "по", "с", "от", "до", "для", "не", "а",
+            "но", "к", "о", "у", "те", "эти", "тот", "тотже", "этот",
+        }
+        words = re.findall(r'[а-яА-ЯёЁa-zA-Z0-9]{3,}', user_text)
+        keywords = [w for w in words if w.lower() not in stop_words]
+        if keywords:
+            # Берём первое содержательное слово — обычно это название объекта
+            return keywords[0]
+        return None
+
+    async def _retry_with_search_results(
+        self,
+        messages: list[dict],
+        search_query: str,
+        search_results: list,
+        user_text: str,
+    ) -> Optional[dict]:
+        """Повторить запрос к AI с результатами поиска сущности.
+
+        Args:
+            messages: текущая история сообщений.
+            search_query: запрос поиска.
+            search_results: результаты search_entities.
+            user_text: оригинальный текст пользователя.
+
+        Returns:
+            Распарсенный OData-запрос или None.
+        """
+        results_str = json.dumps({"query": search_query, "results": search_results, "count": len(search_results)}, ensure_ascii=False)
+        retry_msg = (
+            f"[Автоматический поиск сущностей по запросу '{search_query}']: {results_str}\n\n"
+            f"Используй найденную сущность и СРАЗУ построй OData-запрос JSON для: {user_text}\n"
+            f"⚠️ ТОЛЬКО JSON, без рассуждений! Выбери наиболее подходящую сущность из результатов."
+        )
+        messages.append({"role": "assistant", "content": f"search_entities(query='{search_query}')"})
+        messages.append({"role": "user", "content": retry_msg})
+
+        if self._rate_limiter:
+            await self._rate_limiter.wait()
+
+        try:
+            resp = await self._step1_call_ai(messages, use_tools=False)
+            content = resp.choices[0].message.content or ""
+            query = self._extract_json(content)
+            return query
+        except Exception as e:
+            log.warning("Retry with search results failed: %s", e)
+            return None
+
     @staticmethod
     def _extract_json(text: str) -> Optional[dict]:
         """Извлечь JSON из текста ответа AI."""
@@ -519,6 +683,32 @@ class ODataAgent(BaseAgent):
         content = msg1.content or ""
         log.info("STEP1 final content (len=%d): %s", len(content), content[:1000])
         query = self._extract_json(content)
+
+        if not query:
+            # --- Fallback 1: текстовый вызов инструмента ---
+            text_tool = self._parse_text_tool_call(content)
+            if text_tool:
+                tool_name, tool_args = text_tool
+                query = await self._resolve_text_tool_call(
+                    messages, tool_name, tool_args, user_text,
+                )
+                log.info("STEP1 after text tool resolution: %s",
+                         json.dumps(query, ensure_ascii=False)[:500])
+
+        if not query:
+            # --- Fallback 2: авто-поиск сущности по ключевому слову ---
+            guessed = self._guess_entity_from_text(content, user_text)
+            if guessed:
+                log.info("Auto-searching entity by keyword: '%s'", guessed)
+                results = self._metadata.search_entities(guessed)
+                if results:
+                    query = await self._retry_with_search_results(
+                        messages, guessed, results, user_text,
+                    )
+                    if query:
+                        log.info("STEP1 after auto-search fallback: %s",
+                                 json.dumps(query, ensure_ascii=False)[:500])
+
         if not query:
             log.warning("Не удалось извлечь JSON из ответа AI. Полный ответ:\n%s", content)
             raise QueryError(
