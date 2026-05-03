@@ -1,0 +1,53 @@
+# Version control
+.git
+.gitignore
+
+# Python cache
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+.venv
+venv
+env
+
+# Project runtime data (mounted as volumes or generated)
+.cache
+logs
+env.json
+
+# Tests (not needed in production image)
+tests
+pytest.ini
+.coverage
+htmlcov
+coverage.xml
+
+# Documentation and meta
+*.md
+!README.md
+docs/
+examples/
+LICENSE
+
+# IDE and editor files
+.vscode
+.idea
+*.swp
+*.swo
+
+# Docker files (avoid recursive copy)
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# MCP / Claude config
+.mcp.json
+.claude
