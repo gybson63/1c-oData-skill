@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -60,7 +60,7 @@ class AISettings(BaseModel):
     """Настройки AI-провайдера (OpenAI-совместимый API)."""
 
     api_key: str = Field(default="", description="API-ключ OpenAI")
-    base_url: Optional[str] = Field(default=None, description="Кастомный URL API")
+    base_url: str | None = Field(default=None, description="Кастомный URL API")
     model: str = Field(default="gpt-4o-mini", description="Модель AI")
     rpm: int = Field(default=20, description="Запросов в минуту (rate limit)")
     temperature: float = Field(default=0.1, description="Температура для Шага 1")
@@ -114,7 +114,7 @@ class HistorySettings(BaseModel):
     max_turns: int = Field(default=10, description="Максимальное число пар в истории (для AI-контекста)")
     max_messages: int = Field(default=100, description="Абсолютный максимум сообщений на чат (safety net)")
     trim_to: int = Field(default=60, description="Число сообщений при обрезке (при достижении max_messages)")
-    persist_dir: Optional[str] = Field(
+    persist_dir: str | None = Field(
         default=None,
         description="Директория для сохранения историй на диск (None = только в памяти)",
     )
@@ -135,7 +135,7 @@ class AppSettings(BaseModel):
     # Общие настройки
     cache_dir: str = Field(default=".cache", description="Директория для кэша")
     log_level: str = Field(default="INFO", description="Уровень логирования")
-    log_file: Optional[str] = Field(default=None, description="Путь к файлу лога")
+    log_file: str | None = Field(default=None, description="Путь к файлу лога")
     history_max_turns: int = Field(default=10, description="Максимальное число пар в истории (legacy, используйте history.max_turns)")
 
     # Agents config (сырой dict — для передачи в BaseAgent.initialize)
@@ -155,7 +155,7 @@ class AppSettings(BaseModel):
 # Module-level state (singleton)
 # ---------------------------------------------------------------------------
 
-_settings: Optional[AppSettings] = None
+_settings: AppSettings | None = None
 
 
 def get_settings() -> AppSettings:

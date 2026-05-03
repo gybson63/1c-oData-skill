@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 import abc
-from typing import Any, Optional
+from typing import Any
 
 
 class BaseAgent(abc.ABC):

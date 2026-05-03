@@ -2,27 +2,23 @@
 """Тесты модуля метрик (bot.metrics)."""
 
 import json
-import os
-import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from bot.metrics import (
-    MetricsRegistry,
-    reset_metrics,
-    metrics,
-    track_time,
-    track_sync,
-    CostLogger,
     CostAnalyzer,
     CostBucket,
-    setup_cost_logging,
+    CostLogger,
+    MetricsRegistry,
     get_cost_logger,
-    _cost_logger,
+    metrics,
+    reset_metrics,
+    setup_cost_logging,
+    track_sync,
+    track_time,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -262,7 +258,7 @@ class TestCostLogger:
             input_tokens=100,
             output_tokens=50,
             cost_usd=0.000045,
-            ts=datetime(2026, 5, 4, 12, 0, 0, tzinfo=timezone.utc),
+            ts=datetime(2026, 5, 4, 12, 0, 0, tzinfo=UTC),
         )
 
         # Check file exists
@@ -289,7 +285,7 @@ class TestCostLogger:
             output_tokens=50,
             cost_usd=0.000045,
             chat_id=123456,
-            ts=datetime(2026, 5, 4, 12, 0, 0, tzinfo=timezone.utc),
+            ts=datetime(2026, 5, 4, 12, 0, 0, tzinfo=UTC),
         )
 
         files = list(cost_dir.glob("costs_*.jsonl"))
@@ -300,7 +296,7 @@ class TestCostLogger:
         cost_dir = tmp_path / "costs"
         logger = CostLogger(str(cost_dir))
 
-        base_ts = datetime(2026, 5, 4, 12, 0, 0, tzinfo=timezone.utc)
+        base_ts = datetime(2026, 5, 4, 12, 0, 0, tzinfo=UTC)
         for i in range(5):
             logger.log(
                 model="gpt-4o-mini",
@@ -321,12 +317,12 @@ class TestCostLogger:
         logger.log(
             model="gpt-4o-mini", input_tokens=100, output_tokens=50,
             cost_usd=0.000045,
-            ts=datetime(2026, 5, 3, 23, 59, 0, tzinfo=timezone.utc),
+            ts=datetime(2026, 5, 3, 23, 59, 0, tzinfo=UTC),
         )
         logger.log(
             model="gpt-4o-mini", input_tokens=100, output_tokens=50,
             cost_usd=0.000045,
-            ts=datetime(2026, 5, 4, 0, 1, 0, tzinfo=timezone.utc),
+            ts=datetime(2026, 5, 4, 0, 1, 0, tzinfo=UTC),
         )
 
         files = sorted(cost_dir.glob("costs_*.jsonl"))
@@ -336,7 +332,7 @@ class TestCostLogger:
         cost_dir = tmp_path / "costs"
         logger = CostLogger(str(cost_dir))
 
-        base_ts = datetime(2026, 5, 4, 12, 0, 0, tzinfo=timezone.utc)
+        base_ts = datetime(2026, 5, 4, 12, 0, 0, tzinfo=UTC)
         logger.log(model="gpt-4o-mini", input_tokens=100, output_tokens=50,
                     cost_usd=0.000045, ts=base_ts)
         logger.log(model="gpt-4o", input_tokens=200, output_tokens=100,
@@ -364,7 +360,7 @@ class TestCostAnalyzer:
         cost_dir = tmp_path / "costs"
         logger = CostLogger(str(cost_dir))
 
-        base = datetime(2026, 5, 4, 0, 0, 0, tzinfo=timezone.utc)
+        base = datetime(2026, 5, 4, 0, 0, 0, tzinfo=UTC)
         # 3 записи в один день
         logger.log(model="gpt-4o-mini", input_tokens=100, output_tokens=50,
                     cost_usd=0.000045, ts=base + timedelta(hours=2))
@@ -410,8 +406,8 @@ class TestCostAnalyzer:
         cost_dir = self._make_logger_with_data(tmp_path)
         analyzer = CostAnalyzer(cost_dir)
 
-        since = datetime(2026, 5, 4, 3, 0, 0, tzinfo=timezone.utc)
-        until = datetime(2026, 5, 4, 13, 0, 0, tzinfo=timezone.utc)
+        since = datetime(2026, 5, 4, 3, 0, 0, tzinfo=UTC)
+        until = datetime(2026, 5, 4, 13, 0, 0, tzinfo=UTC)
 
         buckets = analyzer.aggregate("hour", since=since, until=until)
         assert len(buckets) == 1  # только 05:00

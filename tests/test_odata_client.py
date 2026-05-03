@@ -1,13 +1,13 @@
 """Тесты OData HTTP-клиента (lib.odata_client)."""
 
-import pytest
-import respx
-import httpx
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from bot_lib.odata_client import ODataClient
-from bot_lib.exceptions import ODataConnectionError, ODataHTTPError, ODataParseError
+import httpx
+import pytest
+import respx
 
+from bot_lib.exceptions import ODataConnectionError, ODataHTTPError, ODataParseError
+from bot_lib.odata_client import ODataClient
 
 # =========================================================================
 # get_entities
@@ -41,7 +41,7 @@ class TestGetEntities:
     @pytest.mark.asyncio
     async def test_get_entities_with_filter(self, odata_url: str):
         """Запрос с $filter — параметры передаются в query string."""
-        route = respx.get(url__startswith=f"{odata_url}/Catalog_Test").mock(
+        respx.get(url__startswith=f"{odata_url}/Catalog_Test").mock(
             return_value=httpx.Response(200, json={"value": []})
         )
 
@@ -414,7 +414,7 @@ class TestAuth:
         """Basic-авторизация передаётся в заголовке."""
         client = ODataClient(odata_url, username="admin", password="secret")
         # httpx BasicAuth кодирует credentials
-        auth_header = client._client.headers.get("Authorization")
+        client._client.headers.get("Authorization")  # noqa: F841
         # BasicAuth не выставляет заголовок напрямую — он добавляется при запросе
         assert client._client._auth is not None
         await client.close()

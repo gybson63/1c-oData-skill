@@ -9,10 +9,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, urlencode
-
-from typing import TYPE_CHECKING
 
 import httpx
 from tenacity import (
@@ -25,8 +23,8 @@ from tenacity import (
 if TYPE_CHECKING:
     import tenacity
 
-from bot_lib.exceptions import ODataConnectionError, ODataHTTPError
 from bot.metrics import metrics, track_time
+from bot_lib.exceptions import ODataConnectionError, ODataHTTPError
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +32,7 @@ logger = logging.getLogger(__name__)
 _MAX_URL_LENGTH = 8192
 
 
-def _log_retry(retry_state: "tenacity.RetryCallState") -> None:
+def _log_retry(retry_state: tenacity.RetryCallState) -> None:
     """Логировать каждую попытку повтора."""
     logger.warning(
         "Повтор #%d %s — ожидание %.1fs",
@@ -85,7 +83,7 @@ class ODataClient:
         self._verify_ssl = verify_ssl
         self._max_url_length = max_url_length
 
-        auth: Optional[httpx.BasicAuth] = None
+        auth: httpx.BasicAuth | None = None
         extra_headers: dict[str, str] = {"Accept": "application/json"}
 
         if username:
@@ -108,12 +106,12 @@ class ODataClient:
     async def get_entities(
         self,
         entity: str,
-        filter_: Optional[str] = None,
-        select: Optional[str] = None,
-        orderby: Optional[str] = None,
-        top: Optional[int] = None,
-        skip: Optional[int] = None,
-        expand: Optional[str] = None,
+        filter_: str | None = None,
+        select: str | None = None,
+        orderby: str | None = None,
+        top: int | None = None,
+        skip: int | None = None,
+        expand: str | None = None,
         count: bool = False,
     ) -> dict[str, Any]:
         """Получить сущности из OData.
@@ -150,7 +148,7 @@ class ODataClient:
     async def get_count(
         self,
         entity: str,
-        filter_: Optional[str] = None,
+        filter_: str | None = None,
     ) -> int:
         """Получить количество сущностей (``/$count``).
 
@@ -189,9 +187,9 @@ class ODataClient:
         method: str,
         entity: str,
         *,
-        params: Optional[dict[str, Any]] = None,
-        json_data: Optional[dict[str, Any]] = None,
-        headers: Optional[dict[str, str]] = None,
+        params: dict[str, Any] | None = None,
+        json_data: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> httpx.Response:
         """Универсальный HTTP-запрос к OData.
 
@@ -237,14 +235,14 @@ class ODataClient:
 
     @staticmethod
     def _build_params(
-        filter_: Optional[str] = None,
-        select: Optional[str] = None,
-        orderby: Optional[str] = None,
-        top: Optional[int] = None,
-        skip: Optional[int] = None,
-        expand: Optional[str] = None,
+        filter_: str | None = None,
+        select: str | None = None,
+        orderby: str | None = None,
+        top: int | None = None,
+        skip: int | None = None,
+        expand: str | None = None,
         count: bool = False,
-        format_: Optional[str] = None,
+        format_: str | None = None,
     ) -> dict[str, Any]:
         """Собрать OData query-параметры."""
         params: dict[str, Any] = {}
@@ -302,7 +300,7 @@ class ODataClient:
         return full
 
     @staticmethod
-    def _build_url_with_params(base_url: str, path: str, params: Optional[dict[str, Any]]) -> str:
+    def _build_url_with_params(base_url: str, path: str, params: dict[str, Any] | None) -> str:
         """Собрать полный URL с query-string, кодируя пробелы как ``%20``."""
         url = f"{base_url}{path}"
         if params:
@@ -315,9 +313,9 @@ class ODataClient:
         method: str,
         path: str,
         *,
-        params: Optional[dict[str, Any]] = None,
-        json_data: Optional[dict[str, Any]] = None,
-        headers: Optional[dict[str, str]] = None,
+        params: dict[str, Any] | None = None,
+        json_data: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> httpx.Response:
         """Выполнить HTTP-запрос с retry при ошибках соединения.
 
@@ -358,7 +356,7 @@ class ODataClient:
         method: str,
         path: str,
         *,
-        params: Optional[dict[str, Any]] = None,
+        params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Выполнить запрос и вернуть JSON."""
         response = await self._request_raw(method, path, params=params)

@@ -191,7 +191,6 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> CallToolResult:
             status_code = response.status_code
         else:
             # Полный URL — прямой запрос через httpx (с авторизацией клиента)
-            import httpx
             response = await client._client.request(
                 method,
                 url,

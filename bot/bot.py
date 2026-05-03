@@ -7,8 +7,8 @@
 
 from __future__ import annotations
 
-import asyncio
 import argparse
+import asyncio
 import json
 import logging
 import re
@@ -21,27 +21,27 @@ _PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import (
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update  # noqa: E402
+from telegram.error import BadRequest, TimedOut  # noqa: E402
+from telegram.ext import (  # noqa: E402
     ApplicationBuilder,
     CallbackQueryHandler,
-    ContextTypes,
     CommandHandler,
+    ContextTypes,
     MessageHandler,
     filters,
 )
-from telegram.request import HTTPXRequest
-from telegram.error import BadRequest, TimedOut
+from telegram.request import HTTPXRequest  # noqa: E402
 
-from bot.agents.base import BaseAgent
-from bot.agents.odata import ODataAgent
-from bot.agents.formatter import FormatterAgent
-from bot.config import load_settings, get_settings, build_global_config
-from bot.history import HistoryManager
-from bot.logging_config import setup_logging
-from bot.metrics import metrics as app_metrics
-from bot.utils import RateLimiter, sanitize_telegram_html
-from bot_lib.exceptions import ODataSkillError, ODataError, AIError, ConfigError
+from bot.agents.base import BaseAgent  # noqa: E402
+from bot.agents.formatter import FormatterAgent  # noqa: E402
+from bot.agents.odata import ODataAgent  # noqa: E402
+from bot.config import build_global_config, get_settings, load_settings  # noqa: E402
+from bot.history import HistoryManager  # noqa: E402
+from bot.logging_config import setup_logging  # noqa: E402
+from bot.metrics import metrics as app_metrics  # noqa: E402
+from bot.utils import sanitize_telegram_html  # noqa: E402
+from bot_lib.exceptions import AIError, ODataError, ODataSkillError  # noqa: E402
 
 log = logging.getLogger(__name__)
 
@@ -517,11 +517,11 @@ async def post_shutdown(application) -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    _ROOT = Path(__file__).parent.parent
+    _root = Path(__file__).parent.parent
     parser = argparse.ArgumentParser(description="1С Telegram Bot (Multi-Agent)")
-    parser.add_argument("--env-file", default=str(_ROOT / "env.json"))
+    parser.add_argument("--env-file", default=str(_root / "env.json"))
     parser.add_argument("--profile", default="default")
-    parser.add_argument("--cache-dir", default=str(_ROOT / ".cache"))
+    parser.add_argument("--cache-dir", default=str(_root / ".cache"))
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     parser.add_argument("--log-file", default=None, help="Путь к файлу лога (поворот 5 МБ)")
     args = parser.parse_args()
