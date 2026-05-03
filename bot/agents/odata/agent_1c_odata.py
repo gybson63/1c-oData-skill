@@ -4,24 +4,33 @@
 Двухшаговая обработка:
   Шаг 1 — AI формирует OData-запрос (JSON) с помощью function calling
   Шаг 2 — AI форматирует результат для Telegram
+
+Координация модулей:
+  - :mod:`bot.agents.odata.metadata` — кэш и загрузка $metadata
+  - :mod:`bot.agents.odata.odata_http` — выполнение OData-запросов
+  - :mod:`bot.agents.odata.query_builder` — построение $expand, URL-лимиты
+  - :mod:`bot.agents.odata.response_parser` — разрешение ссылок, подготовка данных
+  - :mod:`bot.agents.odata.prompts` — промпты и инструменты для AI
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import re
-from pathlib import Path
 from typing import Any, Optional
 
 from openai import AsyncOpenAI, BadRequestError
 
+from bot.config import get_settings
 from bot.utils import RateLimiter, esc_html
 
 from bot.agents.base import BaseAgent
+from bot_lib.exceptions import ODataError, AIError, AIRateLimitError, AIResponseError
 from .metadata import MetadataCache, fetch_metadata_from_server
-from .odata_http import ODataError, execute_odata_query
+from .odata_http import execute_odata_query
+from .query_builder import build_expand, trim_expand_for_url_limit
+from .response_parser import resolve_references
 from .prompts import (
     ODATA_REFERENCE,
     STEP1_SYSTEM,
@@ -94,34 +103,39 @@ class ODataAgent(BaseAgent):
         cache_dir: str = ".cache",
         env_file: str = "env.json",
     ) -> None:
+        # Мерж agent_config + global_config для обратной совместимости
         self._cfg = {**global_config, **agent_config}
-        self._model = self._cfg.get("ai_model", "gpt-4o-mini")
-        self._metadata = MetadataCache(cache_dir, cache_seconds=self._metadata_cache_seconds)
+
+        # Типизированные настройки через Pydantic Settings
+        settings = get_settings()
+        ai = settings.ai
+        odata = settings.odata_query
+
+        self._model = ai.model
+        self._metadata = MetadataCache(cache_dir, cache_seconds=odata.metadata_cache_seconds)
+        self._metadata_cache_seconds = odata.metadata_cache_seconds
 
         # AI client
         self._ai_client = AsyncOpenAI(
-            api_key=self._cfg["ai_api_key"],
-            base_url=self._cfg.get("ai_base_url"),
+            api_key=ai.api_key,
+            base_url=ai.base_url,
             max_retries=0,
         )
 
         # Rate limiter
-        rpm = self._cfg.get("ai_rpm", 20)
-        self._rate_limiter = RateLimiter(rpm=rpm)
+        self._rate_limiter = RateLimiter(rpm=ai.rpm)
 
-        # Настраиваемые параметры OData
-        odata_cfg = self._cfg.get("odata", {})
-        self._history_max_turns = self._cfg.get("history_max_turns", _DEFAULT_HISTORY_MAX_TURNS)
-        self._default_top = odata_cfg.get("default_top", _DEFAULT_DEFAULT_TOP)
-        self._max_top = odata_cfg.get("max_top", _DEFAULT_MAX_TOP)
-        self._max_expand_fields = odata_cfg.get("max_expand_fields", _DEFAULT_MAX_EXPAND_FIELDS)
-        self._max_url_length = odata_cfg.get("max_url_length", _DEFAULT_MAX_URL_LENGTH)
-        self._request_timeout = odata_cfg.get("request_timeout", 60)
-        self._max_sample_records = odata_cfg.get("max_sample_records", _DEFAULT_MAX_SAMPLE_RECORDS)
-        self._max_data_length = odata_cfg.get("max_data_length", _DEFAULT_MAX_DATA_LENGTH)
-        self._step1_temperature = self._cfg.get("ai_temperature", _DEFAULT_STEP1_TEMPERATURE)
-        self._step2_temperature = self._cfg.get("ai_temperature_step2", _DEFAULT_STEP2_TEMPERATURE)
-        self._metadata_cache_seconds = odata_cfg.get("metadata_cache_seconds", 86400)
+        # Настраиваемые параметры OData — из типизированной конфигурации
+        self._history_max_turns = settings.history_max_turns
+        self._default_top = odata.default_top
+        self._max_top = odata.max_top
+        self._max_expand_fields = odata.max_expand_fields
+        self._max_url_length = odata.max_url_length
+        self._request_timeout = odata.request_timeout
+        self._max_sample_records = odata.max_sample_records
+        self._max_data_length = odata.max_data_length
+        self._step1_temperature = ai.temperature
+        self._step2_temperature = ai.temperature_step2
 
         # MCP
         mcp_config = agent_config.get("mcp_servers", {})
@@ -196,6 +210,18 @@ class ODataAgent(BaseAgent):
             history.append({"role": "user", "content": user_text})
             history.append({"role": "assistant", "content": answer})
             return answer, history[-(self._history_max_turns * 2):]
+        except AIRateLimitError as e:
+            log.warning("AI rate limit: %s", e)
+            answer = "⏳ <b>Превышен лимит запросов к AI.</b> Подождите минуту и повторите."
+            history.append({"role": "user", "content": user_text})
+            history.append({"role": "assistant", "content": answer})
+            return answer, history[-(self._history_max_turns * 2):]
+        except AIError as e:
+            log.error("AI error: %s", e)
+            answer = f"🤖 <b>Ошибка AI-сервиса:</b> {esc_html(str(e))}"
+            history.append({"role": "user", "content": user_text})
+            history.append({"role": "assistant", "content": answer})
+            return answer, history[-(self._history_max_turns * 2):]
         except QueryError as e:
             answer = f"⚠️ {esc_html(str(e))}"
             history.append({"role": "user", "content": user_text})
@@ -208,6 +234,8 @@ class ODataAgent(BaseAgent):
             history.append({"role": "assistant", "content": answer})
             return answer, history[-(self._history_max_turns * 2):]
 
+    # -- AI interaction helpers --
+
     def _is_tool_use_error(self, exc: BadRequestError) -> bool:
         """Проверить, связана ли ошибка с отсутствием поддержки tool use."""
         msg = str(exc).lower()
@@ -217,12 +245,19 @@ class ODataAgent(BaseAgent):
         """Построить системный промпт для Шага 1 (с учетом поддержки инструментов)."""
         base = STEP1_SYSTEM.format(metadata=self._metadata.format_entity_list())
         if not self._tools_supported:
-            # Встроить справочник OData прямо в промпт, т.к. инструменты недоступны
             ref_lines = ["\n\n--- СПРАВОЧНИК ODATA (инструменты недоступны, используй напрямую) ---"]
             for topic, text in ODATA_REFERENCE.items():
                 ref_lines.append(f"\n[{topic}]\n{text}")
             base += "\n".join(ref_lines)
         return base
+
+    @staticmethod
+    def _wrap_ai_error(exc: Exception) -> AIError:
+        """Обернуть ошибку AI-провайдера в типизированное исключение."""
+        msg = str(exc).lower()
+        if "429" in msg or "rate" in msg or "limit" in msg:
+            return AIRateLimitError(f"Превышен лимит запросов: {exc}")
+        return AIError(f"Ошибка AI-сервиса: {exc}")
 
     async def _step1_call_ai(
         self,
@@ -239,7 +274,68 @@ class ODataAgent(BaseAgent):
             kwargs["tools"] = self._tools
             kwargs["tool_choice"] = "auto"
 
-        return await self._ai_client.chat.completions.create(**kwargs)
+        try:
+            return await self._ai_client.chat.completions.create(**kwargs)  # type: ignore[union-attr]
+        except BadRequestError as exc:
+            raise
+        except Exception as exc:
+            raise self._wrap_ai_error(exc) from exc
+
+    # -- tool call handling --
+
+    def _handle_tool_call(self, name: str, args: dict) -> str:
+        """Обработка вызова инструмента (function calling)."""
+        if name == "odata_reference":
+            topic = args.get("topic", "")
+            return ODATA_REFERENCE.get(topic, f"Тема '{topic}' не найдена.")
+        elif name == "get_entity_fields":
+            entity_name = args.get("entity_name", "")
+            fields = self._metadata.get_entity_fields(entity_name)
+            if fields:
+                return json.dumps({"entity": entity_name, "fields": fields}, ensure_ascii=False)
+            return f"Сущность '{entity_name}' не найдена в метаданных."
+        elif name == "search_entities":
+            query = args.get("query", "")
+            results = self._metadata.search_entities(query)
+            if results:
+                return json.dumps({"query": query, "results": results, "count": len(results)}, ensure_ascii=False)
+            return f"По запросу '{query}' ничего не найдено. Попробуйте другое ключевое слово."
+        return f"Неизвестный инструмент: {name}"
+
+    # -- JSON extraction --
+
+    @staticmethod
+    def _extract_json(text: str) -> Optional[dict]:
+        """Извлечь JSON из текста ответа AI."""
+        text = text.strip()
+        # Убрать markdown-обёртки
+        if text.startswith("```"):
+            lines = text.split("\n")
+            lines = [l for l in lines if not l.strip().startswith("```")]
+            text = "\n".join(lines).strip()
+
+        # Найти JSON-объект (с поддержкой вложенных фигурных скобок)
+        start = text.find("{")
+        if start != -1:
+            depth = 0
+            for i in range(start, len(text)):
+                if text[i] == "{":
+                    depth += 1
+                elif text[i] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        candidate = text[start : i + 1]
+                        try:
+                            return json.loads(candidate)
+                        except json.JSONDecodeError:
+                            break
+
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return None
+
+    # -- core processing --
 
     async def _process_internal(
         self,
@@ -265,7 +361,6 @@ class ODataAgent(BaseAgent):
             if use_tools and self._is_tool_use_error(e):
                 log.warning("Модель %s не поддерживает tool use, повтор без инструментов", self._model)
                 self._tools_supported = False
-                # Перестроить промпт со встроенным справочником
                 system_prompt = self._build_step1_prompt()
                 messages[0] = {"role": "system", "content": system_prompt}
                 if self._rate_limiter:
@@ -279,48 +374,8 @@ class ODataAgent(BaseAgent):
                  (msg1.content or "")[:200] if msg1.content else None,
                  [tc.function.name for tc in msg1.tool_calls] if msg1.tool_calls else None)
 
-        # Обработка function calls
-        if msg1.tool_calls:
-            tool_results = []
-            for tc in msg1.tool_calls:
-                fn = tc.function
-                log.info("Tool call: %s(%s)", fn.name, fn.arguments[:300] if fn.arguments else "")
-                result = self._handle_tool_call(fn.name, json.loads(fn.arguments))
-                log.info("Tool result: %s", result[:300] if result else "")
-                tool_results.append({"role": "tool", "tool_call_id": tc.id, "content": result})
-
-            messages.append(msg1.model_dump())  # type: ignore[arg-type]
-            messages.extend(tool_results)
-
-            if self._rate_limiter:
-                await self._rate_limiter.wait()
-
-            resp1b = await self._step1_call_ai(messages, use_tools=True)
-            msg1 = resp1b.choices[0].message
-            log.info("STEP1 after tools: content=%r, tool_calls=%s",
-                     (msg1.content or "")[:300] if msg1.content else None,
-                     [tc.function.name for tc in msg1.tool_calls] if msg1.tool_calls else None)
-
-            # Если модель снова вызвала инструменты — обработать рекурсивно
-            if msg1.tool_calls:
-                tool_results2 = []
-                for tc in msg1.tool_calls:
-                    fn = tc.function
-                    log.info("Tool call (round 2): %s(%s)", fn.name, fn.arguments[:300] if fn.arguments else "")
-                    result = self._handle_tool_call(fn.name, json.loads(fn.arguments))
-                    log.info("Tool result (round 2): %s", result[:300] if result else "")
-                    tool_results2.append({"role": "tool", "tool_call_id": tc.id, "content": result})
-
-                messages.append(msg1.model_dump())  # type: ignore[arg-type]
-                messages.extend(tool_results2)
-
-                if self._rate_limiter:
-                    await self._rate_limiter.wait()
-
-                resp1c = await self._step1_call_ai(messages, use_tools=True)
-                msg1 = resp1c.choices[0].message
-                log.info("STEP1 after tools (round 2): content=%r",
-                         (msg1.content or "")[:500] if msg1.content else None)
+        # Обработка function calls (до 2 раундов)
+        msg1 = await self._resolve_tool_calls(messages, msg1)
 
         # Извлечь JSON из ответа
         content = msg1.content or ""
@@ -342,24 +397,80 @@ class ODataAgent(BaseAgent):
         do_count = query.get("count", False)
 
         if do_count:
-            # Подсчёт записей
-            records, total = await execute_odata_query(
-                odata_url=self._cfg["odata_url"],
-                auth_header=auth,
-                entity=entity,
-                filter_expr=query.get("filter"),
-                count=True,
-                request_timeout=self._request_timeout,
-            )
-            answer = f"<b>📊 Количество</b> <i>{esc_html(entity)}</i>: <code>{total}</code>"
-            if query.get("explanation"):
-                answer += f"\n<i>{esc_html(query['explanation'])}</i>"
-
-            history.append({"role": "user", "content": user_text})
-            history.append({"role": "assistant", "content": json.dumps({"entity": entity, "filter": query.get("filter"), "count": True, "explanation": query.get("explanation", "")}, ensure_ascii=False)})
-            return answer, history[-(self._history_max_turns * 2):]
+            return await self._handle_count_query(user_text, history, query, entity, auth)
 
         # ---- Обычный запрос ----
+        return await self._handle_data_query(user_text, history, query, entity, auth)
+
+    async def _resolve_tool_calls(self, messages: list[dict], msg1) -> Any:
+        """Обработать до 2 раундов function calls от AI.
+
+        Args:
+            messages: список сообщений (mutated — добавляются tool results).
+            msg1: сообщение AI от Шага 1.
+
+        Returns:
+            Финальное сообщение AI после обработки всех tool calls.
+        """
+        for round_num in range(1, 3):
+            if not msg1.tool_calls:
+                break
+
+            tool_results = []
+            for tc in msg1.tool_calls:
+                fn = tc.function
+                log.info("Tool call (round %d): %s(%s)", round_num, fn.name, fn.arguments[:300] if fn.arguments else "")
+                result = self._handle_tool_call(fn.name, json.loads(fn.arguments))
+                log.info("Tool result (round %d): %s", round_num, result[:300] if result else "")
+                tool_results.append({"role": "tool", "tool_call_id": tc.id, "content": result})
+
+            messages.append(msg1.model_dump())  # type: ignore[arg-type]
+            messages.extend(tool_results)
+
+            if self._rate_limiter:
+                await self._rate_limiter.wait()
+
+            resp = await self._step1_call_ai(messages, use_tools=True)
+            msg1 = resp.choices[0].message
+            log.info("STEP1 after tools (round %d): content=%r",
+                     round_num, (msg1.content or "")[:500] if msg1.content else None)
+
+        return msg1
+
+    async def _handle_count_query(
+        self,
+        user_text: str,
+        history: list[dict[str, str]],
+        query: dict,
+        entity: str,
+        auth: str,
+    ) -> tuple[str, list[dict[str, str]]]:
+        """Обработать запрос на подсчёт записей."""
+        records, total = await execute_odata_query(
+            odata_url=self._cfg["odata_url"],
+            auth_header=auth,
+            entity=entity,
+            filter_expr=query.get("filter"),
+            count=True,
+            request_timeout=self._request_timeout,
+        )
+        answer = f"<b>📊 Количество</b> <i>{esc_html(entity)}</i>: <code>{total}</code>"
+        if query.get("explanation"):
+            answer += f"\n<i>{esc_html(query['explanation'])}</i>"
+
+        history.append({"role": "user", "content": user_text})
+        history.append({"role": "assistant", "content": json.dumps({"entity": entity, "filter": query.get("filter"), "count": True, "explanation": query.get("explanation", "")}, ensure_ascii=False)})
+        return answer, history[-(self._history_max_turns * 2):]
+
+    async def _handle_data_query(
+        self,
+        user_text: str,
+        history: list[dict[str, str]],
+        query: dict,
+        entity: str,
+        auth: str,
+    ) -> tuple[str, list[dict[str, str]]]:
+        """Обработать запрос данных сущности."""
         top = min(int(query.get("top") or self._default_top), self._max_top)
 
         # Валидация $select
@@ -373,26 +484,17 @@ class ODataAgent(BaseAgent):
         fields = self._metadata.get_entity_fields(entity)
         if fields:
             log.info("Fields for %s: %s", entity, fields)
-            if select:
-                raw_select = select[len("$select="):] if select.startswith("$select=") else select
-                valid = [f.strip() for f in raw_select.split(",") if f.strip() in fields]
-                select = ",".join(valid) if valid else None
-                if select != raw_select:
-                    log.info("$select скорректирован: %s → %s", raw_select, select)
-            if orderby:
-                raw_orderby = orderby[len("$orderby="):] if orderby.startswith("$orderby=") else orderby
-                field_name = raw_orderby.split()[0]
-                if field_name not in fields:
-                    log.info("$orderby '%s' не найден в полях, убираем", field_name)
-                    orderby = None
+            select = self._validate_select(fields, select)
+            orderby = self._validate_orderby(fields, orderby)
 
         # Построить $expand для раскрытия ссылочных полей
-        expand = self._build_expand_from_select(entity, select)
+        expand = build_expand(entity, select, fields, self._max_expand_fields)
 
         # Проверить длину URL и при необходимости сократить $expand
         filter_expr = query.get("filter")
-        expand = self._trim_expand_for_url_limit(
+        expand = trim_expand_for_url_limit(
             self._cfg["odata_url"], entity, filter_expr, select, orderby, top, expand,
+            max_url_length=self._max_url_length,
         )
 
         # Выполнение OData-запроса
@@ -408,48 +510,15 @@ class ODataAgent(BaseAgent):
             request_timeout=self._request_timeout,
         )
 
-        # Fallback: если 0 записей и фильтр содержит Number + любую дату — попробовать только Number
-        if total == 0 and filter_expr and "Number" in filter_expr:
-            # Убрать ВСЕ условия с datetime из фильтра (Date, ДатаУвольнения, и любые другие)
-            fallback_filter = re.sub(
-                r"\s*and\s+\w+\s+(eq|ge|le|gt|lt)\s+datetime'[^']*'",
-                "", filter_expr
-            )
-            if fallback_filter != filter_expr:
-                log.info("Fallback 1: retry without any date filter: %s", fallback_filter)
-                records, total = await execute_odata_query(
-                    odata_url=self._cfg["odata_url"],
-                    auth_header=auth,
-                    entity=entity,
-                    filter_expr=fallback_filter,
-                    select=select,
-                    orderby=orderby,
-                    top=top,
-                    expand=expand,
-                    request_timeout=self._request_timeout,
-                )
+        # Fallback: если 0 записей и фильтр содержит Number + любую дату
+        records, total = await self._fallback_date_filter(
+            records, total, entity, filter_expr, select, orderby, top, expand, auth,
+        )
 
-        # Fallback 2: если всё ещё 0 и Number с eq — попробовать substringof (OData v3)
-        if total == 0 and filter_expr and "Number eq '" in filter_expr:
-            number_match = re.search(r"Number eq '([^']*)'", filter_expr)
-            if number_match:
-                num = number_match.group(1)
-                # Убрать префикс (например "ДМНВ-000007" → "000007")
-                digits = re.sub(r'^[^\d]+', '', num)
-                if digits and digits != num:
-                    contains_filter = f"DeletionMark eq false and substringof('{digits}', Number)"
-                    log.info("Fallback 2: retry with substringof('%s', Number): %s", digits, contains_filter)
-                    records, total = await execute_odata_query(
-                        odata_url=self._cfg["odata_url"],
-                        auth_header=auth,
-                        entity=entity,
-                        filter_expr=contains_filter,
-                        select=select,
-                        orderby=orderby,
-                        top=top,
-                        expand=expand,
-                        request_timeout=self._request_timeout,
-                    )
+        # Fallback 2: substringof (OData v3)
+        records, total = await self._fallback_substringof(
+            records, total, entity, filter_expr, select, orderby, top, expand, auth,
+        )
 
         # ---- Шаг 2: AI форматирует ответ ----
         answer = await self._ai_format_response(user_text, records, total, entity)
@@ -458,268 +527,112 @@ class ODataAgent(BaseAgent):
         history.append({"role": "assistant", "content": json.dumps({"entity": entity, "filter": query.get("filter"), "select": query.get("select"), "explanation": query.get("explanation", "")}, ensure_ascii=False)})
         return answer, history[-(self._history_max_turns * 2):]
 
-    def _handle_tool_call(self, name: str, args: dict) -> str:
-        """Обработка вызова инструмента (function calling)."""
-        if name == "odata_reference":
-            topic = args.get("topic", "")
-            return ODATA_REFERENCE.get(topic, f"Тема '{topic}' не найдена.")
-        elif name == "get_entity_fields":
-            entity_name = args.get("entity_name", "")
-            fields = self._metadata.get_entity_fields(entity_name)
-            if fields:
-                return json.dumps({"entity": entity_name, "fields": fields}, ensure_ascii=False)
-            return f"Сущность '{entity_name}' не найдена в метаданных."
-        elif name == "search_entities":
-            query = args.get("query", "")
-            results = self._metadata.search_entities(query)
-            if results:
-                return json.dumps({"query": query, "results": results, "count": len(results)}, ensure_ascii=False)
-            return f"По запросу '{query}' ничего не найдено. Попробуйте другое ключевое слово."
-        return f"Неизвестный инструмент: {name}"
+    # -- query validation helpers --
 
     @staticmethod
-    def _extract_json(text: str) -> Optional[dict]:
-        """Извлечь JSON из текста ответа AI."""
-        text = text.strip()
-        # Убрать markdown-обёртки
-        if text.startswith("```"):
-            lines = text.split("\n")
-            lines = [l for l in lines if not l.strip().startswith("```")]
-            text = "\n".join(lines).strip()
+    def _validate_select(fields: list[str], select: Optional[str]) -> Optional[str]:
+        """Скорректировать $select, оставив только существующие поля."""
+        if not select:
+            return select
+        raw_select = select[len("$select="):] if select.startswith("$select=") else select
+        valid = [f.strip() for f in raw_select.split(",") if f.strip() in fields]
+        result = ",".join(valid) if valid else None
+        if result != raw_select:
+            log.info("$select скорректирован: %s → %s", raw_select, result)
+        return result
 
-        # Найти JSON-объект (с поддержкой вложенных фигурных скобок)
-        # Ищем первую { и затем находим парную } подсчётом глубины
-        start = text.find("{")
-        if start != -1:
-            depth = 0
-            for i in range(start, len(text)):
-                if text[i] == "{":
-                    depth += 1
-                elif text[i] == "}":
-                    depth -= 1
-                    if depth == 0:
-                        candidate = text[start : i + 1]
-                        try:
-                            return json.loads(candidate)
-                        except json.JSONDecodeError:
-                            break  # не JSON — не ищем дальше
-
-        # Попробовать весь текст как JSON
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
+    @staticmethod
+    def _validate_orderby(fields: list[str], orderby: Optional[str]) -> Optional[str]:
+        """Скорректировать $orderby, проверив что поле существует."""
+        if not orderby:
+            return orderby
+        raw_orderby = orderby[len("$orderby="):] if orderby.startswith("$orderby=") else orderby
+        field_name = raw_orderby.split()[0]
+        if field_name not in fields:
+            log.info("$orderby '%s' не найден в полях, убираем", field_name)
             return None
+        return orderby
 
+    # -- fallback strategies --
 
-    # Приоритеты раскрытия ссылочных полей через $expand.
-    # Поля с высоким приоритетом (бизнес-суть) раскрываются первыми,
-    # системные/подписи — последними (могут быть отброшены при лимите).
-    _EXPAND_HIGH_PRIORITY: tuple[str, ...] = (
-        "Организация", "Контрагент", "Сотрудник", "ФизическоеЛицо",
-        "Номенклатура", "Склад", "Подразделение", "Должность",
-        "Валюта", "СтатьяЗатрат", "СтатьяТКРФ", "ОснованиеУвольнения",
-        "Основание", "Касса", "Банк", "Проект", "НаправлениеДеятельности",
-        "ВидОперации", "ХозОперация", "ВидРасчета", "ВыходноеПособие",
-        "Компенсация", "Статья",
-    )
-    _EXPAND_LOW_PRIORITY: tuple[str, ...] = (
-        "Руководитель", "ГлавныйБухгалтер", "Бухгалтер",
-        "РаботникКадровойСлужбы", "Исполнитель", "Ответственный",
-        "ОтветственныйИсполнитель", "Рассчитал",
-        "ДолжностьРуководителя", "ДолжностьГлавногоБухгалтера",
-        "ДолжностьБухгалтера", "ДолжностьРаботникаКадровойСлужбы",
-        "ДолжностьИсполнителя", "ДолжностьОтветственногоИсполнителя",
-        "ИсправленныйДокумент",
-    )
-
-    def _expand_priority(self, nav_name: str) -> int:
-        """Вернуть приоритет навигационного свойства (ниже = важнее)."""
-        if nav_name in self._EXPAND_HIGH_PRIORITY:
-            return 0
-        # Проверяем частичные совпадения для high priority
-        for pattern in self._EXPAND_HIGH_PRIORITY:
-            if pattern in nav_name:
-                return 0
-        if nav_name in self._EXPAND_LOW_PRIORITY:
-            return 2
-        # Проверяем частичные совпадения для low priority
-        for pattern in self._EXPAND_LOW_PRIORITY:
-            if pattern in nav_name:
-                return 2
-        if nav_name.startswith("Удалить") or nav_name.startswith("Delete"):
-            return 3
-        return 1  # средний приоритет
-
-    def _build_expand_from_select(self, entity: str, select: Optional[str]) -> Optional[str]:
-        """Построить $expand на основе _Key полей из $select или метаданных.
-
-        Для каждого поля вида «Имя_Key» добавляет навигационное свойство «Имя» в $expand.
-        Если select равен None (все поля) — использует метаданные для поиска всех
-        навигационных свойств сущности.
-
-        Ограничивает количество expand-свойств до MAX_EXPAND_FIELDS,
-        чтобы не превышать лимит длины URL в IIS.
-        """
-        nav_names: list[str] = []
-
-        if select:
-            raw = select[len("$select="):] if select.startswith("$select=") else select
-            field_names = [f.strip() for f in raw.split(",") if f.strip()]
-        else:
-            # select=None → запрашиваем все поля; берём _Key из метаданных
-            field_names = self._metadata.get_entity_fields(entity)
-
-        for f in field_names:
-            if f.endswith("_Key") and f not in (
-                "Ref_Key", "DataVersion", "Predefined", "PredefinedDataName",
-                "IsFolder", "LineNumber", "Parent_Key",
-            ):
-                nav_name = f[:-4]  # убрать суффикс _Key
-                nav_names.append(nav_name)
-
-        if not nav_names:
-            return None
-
-        # Сортировать по приоритету: бизнес-поля первые, системные/подписи — последние
-        nav_names.sort(key=self._expand_priority)
-
-        # Ограничить количество expand-свойств (с учётом приоритета)
-        if len(nav_names) > self._max_expand_fields:
-            log.info(
-                "$expand для %s: %d свойств → ограничено до %d (с приоритетом)",
-                entity, len(nav_names), self._max_expand_fields,
-            )
-            nav_names = nav_names[:self._max_expand_fields]
-
-        expand = ",".join(nav_names)
-        log.info("Auto $expand for %s: %s (from fields: %s)", entity, expand, field_names[:20])
-        return expand
-
-    def _estimate_url_length(
+    async def _fallback_date_filter(
         self,
-        odata_url: str,
+        records: list[dict],
+        total: int,
         entity: str,
         filter_expr: Optional[str],
         select: Optional[str],
         orderby: Optional[str],
         top: int,
         expand: Optional[str],
-    ) -> int:
-        """Приблизительная оценка длины итогового URL OData-запроса."""
-        from urllib.parse import quote
-        base = f"{odata_url.rstrip('/')}/{quote(entity, safe='')}"
-        params = [("$format", "json")]
-        if filter_expr:
-            params.append(("$filter", filter_expr))
-        if select:
-            raw = select[len("$select="):] if select.startswith("$select=") else select
-            params.append(("$select", raw))
-        if orderby:
-            raw = orderby[len("$orderby="):] if orderby.startswith("$orderby=") else orderby
-            params.append(("$orderby", raw))
-        if top:
-            params.append(("$top", str(top)))
-        if expand:
-            raw_expand = expand[len("$expand="):] if expand.startswith("$expand=") else expand
-            params.append(("$expand", raw_expand))
-        url_str = base + "?" + "&".join(f"{k}={quote(v, safe='')}" for k, v in params)
-        return len(url_str)
+        auth: str,
+    ) -> tuple[list[dict], int]:
+        """Fallback: убрать условия с datetime если 0 записей и фильтр содержит Number."""
+        if total != 0 or not filter_expr or "Number" not in filter_expr:
+            return records, total
 
-    def _trim_expand_for_url_limit(
-        self,
-        odata_url: str,
-        entity: str,
-        filter_expr: Optional[str],
-        select: Optional[str],
-        orderby: Optional[str],
-        top: int,
-        expand: Optional[str],
-    ) -> Optional[str]:
-        """Обрезать $expand, если итоговый URL превышает MAX_URL_LENGTH."""
-        if not expand:
-            return expand
-
-        current_url_len = self._estimate_url_length(
-            odata_url, entity, filter_expr, select, orderby, top, expand,
+        fallback_filter = re.sub(
+            r"\s*and\s+\w+\s+(eq|ge|le|gt|lt)\s+datetime'[^']*'",
+            "", filter_expr,
         )
-        if current_url_len <= self._max_url_length:
-            return expand
+        if fallback_filter == filter_expr:
+            return records, total
 
-        # Прогрессивно сокращаем expand
-        nav_list = expand.split(",")
-        while len(nav_list) > 1:
-            nav_list = nav_list[:-1]
-            trimmed = ",".join(nav_list)
-            current_url_len = self._estimate_url_length(
-                odata_url, entity, filter_expr, select, orderby, top, trimmed,
-            )
-            if current_url_len <= self._max_url_length:
-                log.info(
-                    "$expand сокращён: %d → %d свойств (URL %d → %d)",
-                    len(expand.split(",")), len(nav_list),
-                    self._estimate_url_length(
-                        odata_url, entity, filter_expr, select, orderby, top, expand,
-                    ),
-                    current_url_len,
-                )
-                return trimmed
+        log.info("Fallback 1: retry without any date filter: %s", fallback_filter)
+        records, total = await execute_odata_query(
+            odata_url=self._cfg["odata_url"],
+            auth_header=auth,
+            entity=entity,
+            filter_expr=fallback_filter,
+            select=select,
+            orderby=orderby,
+            top=top,
+            expand=expand,
+            request_timeout=self._request_timeout,
+        )
+        return records, total
 
-        # Даже одно свойство не помогает — убираем expand полностью
-        log.warning("$expand убран полностью — URL слишком длинный (%d)", current_url_len)
-        return None
+    async def _fallback_substringof(
+        self,
+        records: list[dict],
+        total: int,
+        entity: str,
+        filter_expr: Optional[str],
+        select: Optional[str],
+        orderby: Optional[str],
+        top: int,
+        expand: Optional[str],
+        auth: str,
+    ) -> tuple[list[dict], int]:
+        """Fallback 2: попробовать substringof если 0 записей с Number eq."""
+        if total != 0 or not filter_expr or "Number eq '" not in filter_expr:
+            return records, total
 
-    @staticmethod
-    def _resolve_references(records: list[dict]) -> list[dict]:
-        """Заменить _Key-GUID на представления из раскрытых навигационных свойств.
+        number_match = re.search(r"Number eq '([^']*)'", filter_expr)
+        if not number_match:
+            return records, total
 
-        Для каждого поля «Имя_Key» ищет пару «Имя» (dict) и берёт из неё
-        Description / НаименованиеПолное / Code / Ref_Key как представление.
-        Раскрытые dict-объекты удаляются, чтобы не засорять данные.
-        """
-        # Имена полей, которые всегда удаляются
-        _SKIP_FIELDS = frozenset({
-            "Ref_Key", "DataVersion", "DeletionMark", "Predefined",
-            "PredefinedDataName", "IsFolder",
-        })
+        num = number_match.group(1)
+        digits = re.sub(r'^[^\d]+', '', num)
+        if not digits or digits == num:
+            return records, total
 
-        resolved = []
-        for rec in records:
-            new_rec: dict[str, Any] = {}
-            # Собираем ключи навигационных свойств (dict-значения без _Key)
-            nav_keys = {k for k, v in rec.items()
-                        if isinstance(v, dict) and not k.endswith("_Key")}
-            # Множество ключей для удаления: служебные + раскрытые объекты
-            remove_keys = set(nav_keys) | _SKIP_FIELDS
+        contains_filter = f"DeletionMark eq false and substringof('{digits}', Number)"
+        log.info("Fallback 2: retry with substringof('%s', Number): %s", digits, contains_filter)
+        records, total = await execute_odata_query(
+            odata_url=self._cfg["odata_url"],
+            auth_header=auth,
+            entity=entity,
+            filter_expr=contains_filter,
+            select=select,
+            orderby=orderby,
+            top=top,
+            expand=expand,
+            request_timeout=self._request_timeout,
+        )
+        return records, total
 
-            for key, value in rec.items():
-                # Пропускаем служебные поля и раскрытые объекты
-                if key in remove_keys:
-                    continue
-                # Заменяем _Key на представление
-                if key.endswith("_Key"):
-                    base = key[:-4]  # Организация_Key → Организация
-                    if base in rec and isinstance(rec[base], dict):
-                        obj = rec[base]
-                        presentation = (
-                            obj.get("Description")
-                            or obj.get("НаименованиеПолное")
-                            or obj.get("Code")
-                            or obj.get("Ref_Key")
-                        )
-                        if presentation and presentation != obj.get("Ref_Key"):
-                            new_rec[base] = presentation
-                        else:
-                            # Нет представления — не показываем
-                            continue
-                    else:
-                        # Нет раскрытого объекта — не показываем GUID
-                        continue
-                else:
-                    new_rec[key] = value
-
-            resolved.append(new_rec)
-
-        return resolved
+    # -- AI formatting (Step 2) --
 
     async def _ai_format_response(
         self,
@@ -729,7 +642,7 @@ class ODataAgent(BaseAgent):
         entity: str,
     ) -> str:
         """Шаг 2: AI форматирует записи в HTML-ответ для Telegram."""
-        resolved = self._resolve_references(records)
+        resolved = resolve_references(records)
         sample = resolved[:self._max_sample_records]
         data_str = json.dumps(sample, ensure_ascii=False, indent=2)
         if len(data_str) > self._max_data_length:
@@ -743,12 +656,19 @@ class ODataAgent(BaseAgent):
         if self._rate_limiter:
             await self._rate_limiter.wait()
 
-        resp = await self._ai_client.chat.completions.create(
-            model=self._model,
-            messages=messages,  # type: ignore[arg-type]
-            temperature=self._step2_temperature,
-        )
-        return resp.choices[0].message.content or "Не удалось сформировать ответ."
+        try:
+            resp = await self._ai_client.chat.completions.create(  # type: ignore[union-attr]
+                model=self._model,
+                messages=messages,  # type: ignore[arg-type]
+                temperature=self._step2_temperature,
+            )
+        except Exception as exc:
+            raise self._wrap_ai_error(exc) from exc
+
+        content = resp.choices[0].message.content
+        if not content:
+            raise AIResponseError("AI вернул пустой ответ на шаге форматирования")
+        return content
 
     # -- status --
 

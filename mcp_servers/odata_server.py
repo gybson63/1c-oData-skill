@@ -16,14 +16,13 @@
 """
 
 import asyncio
-import base64
 import json
 import logging
 import os
 import sys
 from typing import Any
+from urllib.parse import urlparse
 
-import httpx
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import (
@@ -31,6 +30,13 @@ from mcp.types import (
     TextContent,
     Tool,
 )
+
+# Добавляем корневую директорию проекта (на уровень выше) в пути поиска Python
+# Это позволит найти пакет 'bot_lib', который лежит рядом с 'mcp_servers'
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from bot_lib.exceptions import ODataConnectionError, ODataHTTPError
+from bot_lib.odata_client import ODataClient
 
 log = logging.getLogger("1c-odata-mcp")
 
@@ -46,6 +52,27 @@ ODATA_CONNECT_TIMEOUT = float(os.environ.get("ODATA_CONNECT_TIMEOUT", "10"))
 
 if not ODATA_URL:
     log.warning("ODATA_URL не задан — запросы не будут работать")
+
+# ---------------------------------------------------------------------------
+# Shared ODataClient (initialized lazily)
+# ---------------------------------------------------------------------------
+
+_client: ODataClient | None = None
+
+
+async def _get_client() -> ODataClient:
+    """Получить или создать общий ODataClient."""
+    global _client
+    if _client is None:
+        _client = ODataClient(
+            base_url=ODATA_URL,
+            username=ODATA_USER,
+            password=ODATA_PASSWORD,
+            timeout=int(ODATA_TIMEOUT),
+            verify_ssl=False,
+        )
+    return _client
+
 
 # ---------------------------------------------------------------------------
 # MCP Server
@@ -104,6 +131,33 @@ def _success_result(text: str) -> CallToolResult:
     return CallToolResult(content=[TextContent(type="text", text=text)], isError=False)
 
 
+def _extract_relative_url(full_url: str, base_url: str) -> tuple[str, dict[str, str] | None]:
+    """Извлечь относительный путь и query-параметры из полного URL.
+
+    Returns:
+        Кортеж ``(path, query_params_dict_or_None)``.
+    """
+    parsed = urlparse(full_url)
+    path = parsed.path
+
+    # Убрать базовый путь если URL начинается с него
+    base_parsed = urlparse(base_url)
+    base_path = base_parsed.path.rstrip("/")
+    if path.startswith(base_path):
+        path = path[len(base_path):]
+    if not path.startswith("/"):
+        path = "/" + path
+
+    # Разобрать query-параметры
+    query_params: dict[str, str] | None = None
+    if parsed.query:
+        from urllib.parse import parse_qs
+        qs = parse_qs(parsed.query, keep_blank_values=True)
+        query_params = {k: v[0] for k, v in qs.items()}
+
+    return path, query_params
+
+
 @app.call_tool()
 async def call_tool(name: str, arguments: dict[str, Any]) -> CallToolResult:
     """Обрабатывает вызов инструмента."""
@@ -118,39 +172,38 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> CallToolResult:
     if not url:
         return _error_result("Ошибка: не указан URL")
 
-    # Build headers: Basic auth + Accept
-    auth_token = base64.b64encode(f"{ODATA_USER}:{ODATA_PASSWORD}".encode("utf-8")).decode("ascii")
-
-    headers = {
-        "Authorization": f"Basic {auth_token}",
-        "Accept": "application/json",
-    }
-    headers.update(extra_headers)
-
     log.info("fetch %s %s", method, url[:200])
 
     try:
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(ODATA_TIMEOUT, connect=ODATA_CONNECT_TIMEOUT),
-            follow_redirects=True,
-            verify=False,  # 1C self-signed certs
-        ) as client:
-            if method == "GET":
-                resp = await client.get(url, headers=headers)
-            elif method == "POST":
-                resp = await client.post(url, headers=headers, content=body)
-            elif method == "PATCH":
-                resp = await client.patch(url, headers=headers, content=body)
-            elif method == "DELETE":
-                resp = await client.delete(url, headers=headers)
-            else:
-                return _error_result(f"Неподдерживаемый метод: {method}")
+        client = await _get_client()
 
-        resp_text = resp.text
+        # Если URL начинается с base_url — используем relative path
+        if url.startswith(ODATA_URL):
+            path, query_params = _extract_relative_url(url, ODATA_URL)
+            response = await client.raw_request(
+                method,
+                path,
+                params=query_params,
+                json_data=json.loads(body) if body else None,
+                headers=extra_headers or None,
+            )
+            resp_text = response.text
+            status_code = response.status_code
+        else:
+            # Полный URL — прямой запрос через httpx (с авторизацией клиента)
+            import httpx
+            response = await client._client.request(
+                method,
+                url,
+                headers=extra_headers or None,
+                content=body,
+            )
+            resp_text = response.text
+            status_code = response.status_code
 
-        # Error status → isError=True with HTTP status code
-        if resp.status_code >= 400:
-            error_msg = f"HTTP {resp.status_code}"
+        # Error status → isError=True
+        if status_code >= 400:
+            error_msg = f"HTTP {status_code}"
             try:
                 err_data = json.loads(resp_text)
                 odata_err = err_data.get("error", {})
@@ -168,10 +221,10 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> CallToolResult:
 
         return _success_result(resp_text)
 
-    except httpx.ConnectError as e:
+    except ODataHTTPError as e:
+        return _error_result(f"HTTP {e.status_code}: {e}")
+    except ODataConnectionError as e:
         return _error_result(f"Ошибка соединения: {e}")
-    except httpx.TimeoutException as e:
-        return _error_result(f"Таймаут запроса: {e}")
     except Exception as e:
         log.exception("fetch error")
         return _error_result(f"Ошибка: {e}")

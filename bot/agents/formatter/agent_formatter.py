@@ -13,8 +13,10 @@ from typing import Any, Optional
 
 from openai import AsyncOpenAI
 
+from bot.config import get_settings
 from bot.utils import RateLimiter
 from bot.agents.base import BaseAgent
+from bot_lib.exceptions import AIResponseError, AIRateLimitError
 from .prompts import FORMATTER_SYSTEM
 
 log = logging.getLogger(__name__)
@@ -42,26 +44,29 @@ class FormatterAgent(BaseAgent):
         cache_dir: str = ".cache",
         env_file: str = "env.json",
     ) -> None:
-        cfg = {**global_config, **agent_config}
-        self._enabled = cfg.get("enabled", True)
+        # Типизированные настройки через Pydantic Settings
+        settings = get_settings()
+        fmt = settings.formatter
+        ai = settings.ai
+
+        self._enabled = fmt.enabled
 
         if not self._enabled:
             log.info("FormatterAgent отключён в конфигурации (enabled=false)")
             self._initialized = True
             return
 
-        self._model = cfg.get("formatter_model") or cfg.get("ai_model", "gpt-4o-mini")
+        self._model = fmt.formatter_model
 
         self._ai_client = AsyncOpenAI(
-            api_key=cfg["ai_api_key"],
-            base_url=cfg.get("ai_base_url"),
+            api_key=ai.api_key,
+            base_url=ai.base_url,
             max_retries=0,
         )
 
-        rpm = cfg.get("ai_rpm", 20)
-        self._rate_limiter = RateLimiter(rpm=rpm)
+        self._rate_limiter = RateLimiter(rpm=ai.rpm)
 
-        self._temperature = cfg.get("temperature", 0.2)
+        self._temperature = fmt.temperature
 
         self._initialized = True
         log.info("FormatterAgent инициализирован (model=%s, temperature=%s)", self._model, self._temperature)
@@ -122,15 +127,19 @@ class FormatterAgent(BaseAgent):
                 messages=messages,  # type: ignore[arg-type]
                 temperature=self._temperature,
             )
+        except Exception as exc:
+            raise AIRateLimitError(f"AI API error in formatter: {exc}") from exc
+
+        try:
             formatted = resp.choices[0].message.content or raw_answer
-            log.info(
-                "FormatterAgent: %d → %d символов",
-                len(raw_answer), len(formatted),
-            )
-            return formatted
-        except Exception:
-            log.warning("FormatterAgent: ошибка форматирования, возврат исходного текста", exc_info=True)
-            return raw_answer
+        except (IndexError, AttributeError) as exc:
+            raise AIResponseError(f"Некорректный ответ AI в форматере: {exc}") from exc
+
+        log.info(
+            "FormatterAgent: %d → %d символов",
+            len(raw_answer), len(formatted),
+        )
+        return formatted
 
     # -- status --
 
