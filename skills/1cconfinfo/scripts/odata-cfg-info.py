@@ -30,7 +30,6 @@ import time
 import urllib.error
 import urllib.request
 from collections import OrderedDict
-from typing import Optional
 
 # Pylance: reconfigure существует в CPython runtime, но не в type stubs
 if hasattr(sys.stdout, "reconfigure"):
@@ -46,14 +45,13 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 # --- Импорт общей библиотеки ---
-from bot_lib.exceptions import ConfigError, ODataHTTPError, ODataConnectionError
-from bot_lib.metadata_parser import (
+from bot_lib.exceptions import ConfigError, ODataConnectionError, ODataHTTPError  # noqa: E402
+from bot_lib.metadata_parser import (  # noqa: E402
     PREFIX_TO_TYPE,
-    TYPE_RU,
     TYPE_ORDER,
+    TYPE_RU,
     classify_entity_sets,
 )
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 # ODataConfigInfo — анализ конфигурации 1С через $metadata
@@ -85,7 +83,7 @@ class ODataConfigInfo:
         self._type_counts: OrderedDict[str, int] = type_counts
         self._type_names: dict[str, list[str]] = type_names
         self._entity_sets = entity_sets
-        self._namespace: Optional[str] = namespace or None
+        self._namespace: str | None = namespace or None
 
         self._total_objects = sum(type_counts.values())
         self._total_entity_sets = len(entity_sets)
@@ -103,7 +101,7 @@ class ODataConfigInfo:
         return self._total_entity_sets
 
     @property
-    def namespace(self) -> Optional[str]:
+    def namespace(self) -> str | None:
         """Пространство имён (обычно — имя конфигурации)."""
         return self._namespace
 
@@ -246,7 +244,7 @@ class MetadataCache:
         url_hash = hashlib.md5(odata_url.encode()).hexdigest()[:8]
         return os.path.join(self._dir, f"odata_metadata_{url_hash}.xml")
 
-    def load(self, odata_url: str) -> Optional[str]:
+    def load(self, odata_url: str) -> str | None:
         """Загрузить метаданные из кэша.
 
         Returns:
@@ -280,7 +278,7 @@ class MetadataCache:
         logger.debug("Saved metadata to cache: %s", path)
         return path
 
-    def get_age(self, odata_url: str) -> Optional[int]:
+    def get_age(self, odata_url: str) -> int | None:
         """Получить возраст кэша в секундах или ``None`` если кэша нет."""
         path = self._cache_path(odata_url)
         if not os.path.isfile(path):
@@ -323,7 +321,7 @@ def fetch_metadata(
         "Accept": "application/xml",
     }
     if username:
-        auth = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+        auth = base64.b64encode(f"{username}:{password}".encode()).decode("ascii")
         headers["Authorization"] = f"Basic {auth}"
 
     req = urllib.request.Request(metadata_url, headers=headers)
@@ -415,7 +413,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Optional[list[str]] = None) -> str:
+def main(argv: list[str] | None = None) -> str:
     """Точка входа CLI.
 
     Args:
@@ -467,7 +465,7 @@ def main(argv: Optional[list[str]] = None) -> str:
     # --- Get XML content (cache or network) ---
     cache = MetadataCache(cache_dir, ttl=args.CacheTTL)
 
-    xml_content: Optional[str] = None
+    xml_content: str | None = None
     cache_note = ""
 
     if not args.ForceRefresh:

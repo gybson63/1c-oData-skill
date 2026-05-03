@@ -12,8 +12,8 @@ setup_logging(
     log_dir="logs",
 )
 
-from bot.metrics import setup_cost_logging
-from bot.bot import main
+from bot.bot import main  # noqa: E402
+from bot.metrics import setup_cost_logging  # noqa: E402
 
 # Инициализировать логирование AI-затрат в logs/costs/
 setup_cost_logging(cost_dir="logs/costs")

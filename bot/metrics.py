@@ -39,14 +39,14 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import time
 from collections import defaultdict
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, AsyncIterator, Optional
+from typing import Any
 
 log = logging.getLogger(__name__)
 
@@ -148,7 +148,7 @@ class MetricsRegistry:
             duration,
         )
 
-    def get_timer(self, name: str) -> Optional[TimerEntry]:
+    def get_timer(self, name: str) -> TimerEntry | None:
         """Получить запись таймера."""
         return self._timers.get(name)
 
@@ -194,7 +194,7 @@ class MetricsRegistry:
             cost,
         )
 
-    def get_ai_usage(self, model: Optional[str] = None) -> dict[str, AIUsageEntry] | AIUsageEntry | None:
+    def get_ai_usage(self, model: str | None = None) -> dict[str, AIUsageEntry] | AIUsageEntry | None:
         """Получить запись использования AI.
 
         Args:
@@ -449,7 +449,7 @@ class CostLogger:
             ts: точное время события (None = сейчас).
         """
         if ts is None:
-            ts = datetime.now(tz=timezone.utc)
+            ts = datetime.now(tz=UTC)
 
         entry = {
             "ts": ts.isoformat(),

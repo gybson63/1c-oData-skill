@@ -1,11 +1,12 @@
 """Тесты конфигурации (bot.config)."""
 
 import json
+
 import pytest
 
 from bot.config import (
-    AppSettings,
     AISettings,
+    AppSettings,
     BotSettings,
     FormatterSettings,
     ODataQuerySettings,
@@ -15,7 +16,6 @@ from bot.config import (
     load_settings,
 )
 from bot_lib.exceptions import ConfigError
-
 
 # =========================================================================
 # load_settings — успешные сценарии

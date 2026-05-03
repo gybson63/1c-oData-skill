@@ -11,12 +11,15 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Optional
 
-from bot_lib.exceptions import ODataError, ODataConnectionError, ODataHTTPError
+from bot_lib.exceptions import ODataConnectionError, ODataError, ODataHTTPError
 from bot_lib.metadata_parser import (
     parse_entity_fields as _parse_entity_fields,
+)
+from bot_lib.metadata_parser import (
     parse_entity_sets as _parse_entity_sets,
+)
+from bot_lib.metadata_parser import (
     search_entities as _search_entities,
 )
 from bot_lib.odata_client import ODataClient

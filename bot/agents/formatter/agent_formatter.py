@@ -9,15 +9,16 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Any
 
 from openai import AsyncOpenAI
 
+from bot.agents.base import BaseAgent
 from bot.config import get_settings
 from bot.metrics import metrics, track_time
 from bot.utils import RateLimiter
-from bot.agents.base import BaseAgent
-from bot_lib.exceptions import AIResponseError, AIRateLimitError
+from bot_lib.exceptions import AIRateLimitError, AIResponseError
+
 from .prompts import FORMATTER_SYSTEM
 
 log = logging.getLogger(__name__)
@@ -30,9 +31,9 @@ class FormatterAgent(BaseAgent):
 
     def __init__(self) -> None:
         super().__init__()
-        self._ai_client: Optional[AsyncOpenAI] = None
+        self._ai_client: AsyncOpenAI | None = None
         self._model: str = ""
-        self._rate_limiter: Optional[RateLimiter] = None
+        self._rate_limiter: RateLimiter | None = None
         self._enabled: bool = True
         self._temperature: float = 0.2
 

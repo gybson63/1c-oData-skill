@@ -40,7 +40,7 @@ import sys
 import threading
 import time
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime
 from io import TextIOWrapper
 from pathlib import Path
 

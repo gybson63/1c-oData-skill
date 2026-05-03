@@ -8,8 +8,6 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
-from urllib.parse import quote
 
 from bot_lib.exceptions import ODataError
 from bot_lib.odata_client import ODataClient
@@ -25,13 +23,13 @@ async def execute_odata_query(
     odata_url: str,
     auth_header: str,
     entity: str,
-    filter_expr: Optional[str] = None,
-    select: Optional[str] = None,
-    orderby: Optional[str] = None,
+    filter_expr: str | None = None,
+    select: str | None = None,
+    orderby: str | None = None,
     top: int = 20,
-    skip: Optional[int] = None,
+    skip: int | None = None,
     count: bool = False,
-    expand: Optional[str] = None,
+    expand: str | None = None,
     request_timeout: int = 60,
     max_url_length: int = 2000,
 ) -> tuple[list[dict], int]:

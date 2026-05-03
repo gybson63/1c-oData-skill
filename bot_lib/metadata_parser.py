@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import logging
 from collections import OrderedDict
-from typing import Optional
 from xml.etree import ElementTree as ET
 
 logger = logging.getLogger(__name__)
@@ -74,7 +73,7 @@ TYPE_ORDER: list[str] = list(PREFIX_TO_TYPE.values())
 # XML helpers — namespace-agnostic find
 # ---------------------------------------------------------------------------
 
-def find_ns(elem: ET.Element, tag: str, ns_candidates: list[str]) -> Optional[ET.Element]:
+def find_ns(elem: ET.Element, tag: str, ns_candidates: list[str]) -> ET.Element | None:
     """Найти первый дочерний элемент ``tag`` в одном из namespace-кандидатов."""
     for ns in ns_candidates:
         found = elem.find(f"{{{ns}}}{tag}")
@@ -92,7 +91,7 @@ def findall_ns(elem: ET.Element, tag: str, ns_candidates: list[str]) -> list[ET.
     return elem.findall(tag)
 
 
-def _parse_root(xml_text: str) -> Optional[ET.Element]:
+def _parse_root(xml_text: str) -> ET.Element | None:
     """Безопасно разобрать XML текст в Element, логируя ошибки."""
     try:
         return ET.fromstring(xml_text)
@@ -141,7 +140,7 @@ def iter_nav_properties(etype: ET.Element):
 # Парсинг EntitySet → Schema → EntityContainer
 # ---------------------------------------------------------------------------
 
-def find_schema(root: ET.Element) -> Optional[ET.Element]:
+def find_schema(root: ET.Element) -> ET.Element | None:
     """Найти элемент Schema внутри EDMX DataServices."""
     ns_list = EDM_NAMESPACES + [""]
     data_services = find_ns(root, "DataServices", [EDMX_NS])

@@ -5,22 +5,19 @@ from __future__ import annotations
 
 import logging
 import os
-import shutil
-import tempfile
 import time
 
 import pytest
 
 from bot.logging_config import (
+    RotatingSessionFileHandler,
+    _cleanup_old_logs,
     _DeduplicateFilter,
     _make_log_filename,
-    _cleanup_old_logs,
     get_session_id,
     get_structlog,
     setup_logging,
-    RotatingSessionFileHandler,
 )
-
 
 # ---------------------------------------------------------------------------
 # Фикстуры

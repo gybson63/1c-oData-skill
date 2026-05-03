@@ -37,9 +37,7 @@ import json
 import logging
 import os
 import shutil
-import sys
-from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 log = logging.getLogger("1c-bot.mcp")
 
@@ -55,7 +53,7 @@ class MCPToolError(Exception):
 # Lazy import — mcp package may not be installed
 # ---------------------------------------------------------------------------
 
-_mcp_available: Optional[bool] = None
+_mcp_available: bool | None = None
 
 
 def _check_mcp_available() -> bool:
@@ -117,10 +115,10 @@ class MCPServerConnection:
         self._openai_tools: list[dict] = []
 
         # Background task that owns the connection context managers
-        self._bg_task: Optional[asyncio.Task] = None
+        self._bg_task: asyncio.Task | None = None
         self._ready: asyncio.Event = asyncio.Event()
         self._connected: bool = False
-        self._connect_error: Optional[str] = None
+        self._connect_error: str | None = None
 
     # -- public API ----------------------------------------------------------
 
@@ -202,7 +200,7 @@ class MCPServerConnection:
 
     async def _bg_stdio(self) -> None:
         from mcp import ClientSession
-        from mcp.client.stdio import stdio_client, StdioServerParameters
+        from mcp.client.stdio import StdioServerParameters, stdio_client
 
         command = self.config.get("command", "")
         if not command:

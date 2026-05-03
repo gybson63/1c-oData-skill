@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
 from urllib.parse import quote
 
 log = logging.getLogger(__name__)
@@ -73,10 +72,10 @@ _SKIP_KEY_FIELDS = (
 
 def build_expand(
     entity: str,
-    select: Optional[str],
+    select: str | None,
     entity_fields: list[str],
     max_expand_fields: int = 15,
-) -> Optional[str]:
+) -> str | None:
     """Построить ``$expand`` на основе _Key полей.
 
     Если ``select`` задан — извлекает _Key-поля из него.
@@ -133,11 +132,11 @@ def build_expand(
 def estimate_url_length(
     odata_url: str,
     entity: str,
-    filter_expr: Optional[str],
-    select: Optional[str],
-    orderby: Optional[str],
+    filter_expr: str | None,
+    select: str | None,
+    orderby: str | None,
     top: int,
-    expand: Optional[str],
+    expand: str | None,
 ) -> int:
     """Приблизительная оценка длины итогового URL OData-запроса."""
     base = f"{odata_url.rstrip('/')}/{quote(entity, safe='')}"
@@ -162,13 +161,13 @@ def estimate_url_length(
 def trim_expand_for_url_limit(
     odata_url: str,
     entity: str,
-    filter_expr: Optional[str],
-    select: Optional[str],
-    orderby: Optional[str],
+    filter_expr: str | None,
+    select: str | None,
+    orderby: str | None,
     top: int,
-    expand: Optional[str],
+    expand: str | None,
     max_url_length: int = 1800,
-) -> Optional[str]:
+) -> str | None:
     """Обрезать ``$expand``, если итоговый URL превышает ``max_url_length``.
 
     Удаляет свойства с конца (с низким приоритетом), пока URL не уложится

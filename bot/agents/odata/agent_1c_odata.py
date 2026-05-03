@@ -18,26 +18,21 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any, Optional
+from typing import Any
 
 from openai import AsyncOpenAI, BadRequestError
 
+from bot.agents.base import BaseAgent
 from bot.config import get_settings
 from bot.metrics import metrics, track_time
 from bot.utils import RateLimiter, esc_html
+from bot_lib.exceptions import AIError, AIRateLimitError, AIResponseError, ODataError
 
-from bot.agents.base import BaseAgent
-from bot_lib.exceptions import ODataError, AIError, AIRateLimitError, AIResponseError
 from .metadata import MetadataCache, fetch_metadata_from_server
 from .odata_http import execute_odata_query
+from .prompts import ODATA_REFERENCE, STEP1_SYSTEM, STEP2_SYSTEM, make_step1_tools
 from .query_builder import build_expand, trim_expand_for_url_limit
 from .response_parser import resolve_references
-from .prompts import (
-    ODATA_REFERENCE,
-    STEP1_SYSTEM,
-    STEP2_SYSTEM,
-    make_step1_tools,
-)
 
 log = logging.getLogger(__name__)
 
@@ -103,12 +98,12 @@ class ODataAgent(BaseAgent):
 
     def __init__(self) -> None:
         super().__init__()
-        self._ai_client: Optional[AsyncOpenAI] = None
+        self._ai_client: AsyncOpenAI | None = None
         self._metadata = MetadataCache()
         self._mcp_manager = None
         self._cfg: dict[str, Any] = {}
         self._model: str = ""
-        self._rate_limiter: Optional[RateLimiter] = None
+        self._rate_limiter: RateLimiter | None = None
         self._tools: list[dict] = []
         self._tools_map: dict[str, Any] = {}
         self._tools_supported: bool = True
@@ -351,7 +346,7 @@ class ODataAgent(BaseAgent):
         async with track_time("ai_step1"):
             try:
                 resp = await self._ai_client.chat.completions.create(**kwargs)  # type: ignore[union-attr]
-            except BadRequestError as exc:
+            except BadRequestError:
                 raise
             except Exception as exc:
                 raise self._wrap_ai_error(exc) from exc
@@ -463,7 +458,7 @@ class ODataAgent(BaseAgent):
     )
 
     @classmethod
-    def _parse_text_tool_call(cls, text: str) -> Optional[tuple[str, dict]]:
+    def _parse_text_tool_call(cls, text: str) -> tuple[str, dict | None]:
         """Распознать текстовый вызов инструмента в ответе AI.
 
         Поддерживаемые форматы::
@@ -542,7 +537,7 @@ class ODataAgent(BaseAgent):
             )
         return query
 
-    def _guess_entity_from_text(self, content: str, user_text: str) -> Optional[str]:
+    def _guess_entity_from_text(self, content: str, user_text: str) -> str | None:
         """Попытаться извлечь ключевое слово для поиска сущности из текста.
 
         Используется как последний fallback, когда модель написала рассуждения
@@ -570,7 +565,7 @@ class ODataAgent(BaseAgent):
         search_query: str,
         search_results: list,
         user_text: str,
-    ) -> Optional[dict]:
+    ) -> dict | None:
         """Повторить запрос к AI с результатами поиска сущности.
 
         Args:
@@ -604,7 +599,7 @@ class ODataAgent(BaseAgent):
             return None
 
     @staticmethod
-    def _extract_json(text: str) -> Optional[dict]:
+    def _extract_json(text: str) -> dict | None:
         """Извлечь JSON из текста ответа AI."""
         text = text.strip()
         # Убрать повторяющиеся префиксы вида "tool_calls:" перед JSON
@@ -613,7 +608,7 @@ class ODataAgent(BaseAgent):
         # Убрать markdown-обёртки
         if text.startswith("```"):
             lines = text.split("\n")
-            lines = [l for l in lines if not l.strip().startswith("```")]
+            lines = [line for line in lines if not line.strip().startswith("```")]
             text = "\n".join(lines).strip()
 
         # Найти JSON-объект (с поддержкой вложенных фигурных скобок)
@@ -883,7 +878,7 @@ class ODataAgent(BaseAgent):
     # -- query validation helpers --
 
     @staticmethod
-    def _validate_select(fields: list[str], select: Optional[str]) -> Optional[str]:
+    def _validate_select(fields: list[str], select: str | None) -> str | None:
         """Скорректировать $select, оставив только существующие поля."""
         if not select:
             return select
@@ -895,7 +890,7 @@ class ODataAgent(BaseAgent):
         return result
 
     @staticmethod
-    def _validate_orderby(fields: list[str], orderby: Optional[str]) -> Optional[str]:
+    def _validate_orderby(fields: list[str], orderby: str | None) -> str | None:
         """Скорректировать $orderby, проверив что поле существует."""
         if not orderby:
             return orderby
@@ -913,12 +908,12 @@ class ODataAgent(BaseAgent):
         records: list[dict],
         total: int,
         entity: str,
-        filter_expr: Optional[str],
-        select: Optional[str],
-        orderby: Optional[str],
+        filter_expr: str | None,
+        select: str | None,
+        orderby: str | None,
         top: int,
-        skip: Optional[int],
-        expand: Optional[str],
+        skip: int | None,
+        expand: str | None,
         auth: str,
     ) -> tuple[list[dict], int]:
         """Fallback: убрать условия с datetime если 0 записей и фильтр содержит Number."""
@@ -952,12 +947,12 @@ class ODataAgent(BaseAgent):
         records: list[dict],
         total: int,
         entity: str,
-        filter_expr: Optional[str],
-        select: Optional[str],
-        orderby: Optional[str],
+        filter_expr: str | None,
+        select: str | None,
+        orderby: str | None,
         top: int,
-        skip: Optional[int],
-        expand: Optional[str],
+        skip: int | None,
+        expand: str | None,
         auth: str,
     ) -> tuple[list[dict], int]:
         """Fallback 2: попробовать substringof если 0 записей с Number eq."""
@@ -999,7 +994,7 @@ class ODataAgent(BaseAgent):
         entity: str,
         shown: int = 0,
         skip: int = 0,
-        prev_last_record: Optional[dict] = None,
+        prev_last_record: dict | None = None,
     ) -> str:
         """Шаг 2: AI форматирует записи в HTML-ответ для Telegram."""
         resolved = resolve_references(records)
@@ -1059,7 +1054,7 @@ class ODataAgent(BaseAgent):
         """Сохранить контекст последнего запроса для пагинации."""
         self._pagination_states[chat_id] = context
 
-    def get_pagination_state(self, chat_id: int) -> Optional[dict[str, Any]]:
+    def get_pagination_state(self, chat_id: int) -> dict[str, Any | None]:
         """Получить контекст пагинации для чата."""
         return self._pagination_states.get(chat_id)
 
@@ -1071,7 +1066,7 @@ class ODataAgent(BaseAgent):
         self,
         chat_id: int,
         skip: int,
-    ) -> tuple[str, Optional[dict[str, Any]]]:
+    ) -> tuple[str, dict[str, Any | None]]:
         """Выполнить запрос с заданным skip (для inline-кнопок пагинации).
 
         Не проходит через AI Step 1 — использует сохранённый контекст запроса.
@@ -1098,7 +1093,7 @@ class ODataAgent(BaseAgent):
         auth = self._auth_header()
 
         # При пагинации (skip > 0) захватить последний элемент предыдущей страницы
-        prev_last_record: Optional[dict] = None
+        prev_last_record: dict | None = None
         effective_skip = skip
         effective_top = top
 

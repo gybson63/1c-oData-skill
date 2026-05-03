@@ -26,7 +26,6 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +51,7 @@ class HistoryManager:
         self,
         max_messages: int = DEFAULT_MAX_MESSAGES,
         trim_to: int = DEFAULT_TRIM_TO,
-        persist_dir: Optional[str] = None,
+        persist_dir: str | None = None,
     ) -> None:
         self._max = max_messages
         self._trim_to = min(trim_to, max_messages)
