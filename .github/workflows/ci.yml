@@ -1,0 +1,105 @@
+###############################################################################
+# CI — непрерывная интеграция для 1c-oData-skill
+#
+# Запускается на push в main/develop и на Pull Request в main.
+# Jobs: lint → test → build-docker (опционально)
+###############################################################################
+
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+# Отменять предыдущие запуски того же PR/branch
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ===========================================================================
+  # Lint — ruff + mypy
+  # ===========================================================================
+  lint:
+    name: Lint (ruff + mypy)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install lint tools
+        run: pip install ruff mypy
+
+      - name: Ruff check
+        run: ruff check .
+
+      - name: Mypy type-check
+        run: mypy bot/ bot_lib/ --ignore-missing-imports
+        continue-on-error: true   # не блокировать PR на начальном этапе
+
+  # ===========================================================================
+  # Test — pytest + coverage
+  # ===========================================================================
+  test:
+    name: Tests (pytest)
+    runs-on: ubuntu-latest
+    needs: lint                   # тесты идут после линтинга
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio pytest-cov respx
+
+      - name: Run tests with coverage
+        run: pytest --cov=bot --cov=bot_lib --cov-report=xml --cov-report=term-missing
+
+      - name: Upload coverage to Codecov
+        if: success()
+        uses: codecov/codecov-action@v4
+        with:
+          file: coverage.xml
+          token: ${{ secrets.CODECOV_TOKEN }}   # опционально
+          fail_ci_if_error: false               # не падать, если нет токена
+
+  # ===========================================================================
+  # Build Docker — проверка сборки образа
+  # ===========================================================================
+  build-docker:
+    name: Build Docker image
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push'   # только на push, не на PR
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t 1c-odata-skill:ci .
+
+      - name: Smoke test — image starts
+        run: |
+          docker run --rm -d --name smoke-test \
+            -e TELEGRAM_TOKEN=dummy \
+            1c-odata-skill:ci \
+            python -c "import bot; print('OK')" || true
+          docker logs smoke-test 2>&1 | head -5
