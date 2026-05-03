@@ -2,6 +2,7 @@
 """Работа с $metadata 1С OData.
 
 Загрузка, кэширование и поиск сущностей / полей.
+Парсинг XML делегируется :mod:`lib.metadata_parser`.
 """
 
 from __future__ import annotations
@@ -11,9 +12,14 @@ import logging
 import time
 from pathlib import Path
 from typing import Optional
-from xml.etree import ElementTree as ET
 
-import httpx
+from bot_lib.exceptions import ODataError, ODataConnectionError, ODataHTTPError
+from bot_lib.metadata_parser import (
+    parse_entity_fields as _parse_entity_fields,
+    parse_entity_sets as _parse_entity_sets,
+    search_entities as _search_entities,
+)
+from bot_lib.odata_client import ODataClient
 
 log = logging.getLogger(__name__)
 
@@ -22,88 +28,34 @@ DEFAULT_METADATA_CACHE_SECONDS = 86400  # 24 часа
 
 
 # ---------------------------------------------------------------------------
-# Загрузка $metadata
+# Загрузка $metadata (делегирует ODataClient)
 # ---------------------------------------------------------------------------
 
-def _iter_entity_types(root: ET.Element):
-    """Итератор по всем EntityType из $metadata (поддержка разных namespace)."""
-    # Known EDM namespaces used by 1C OData
-    edm_namespaces = [
-        "http://schemas.microsoft.com/ado/2008/09/edm",
-        "http://schemas.microsoft.com/ado/2009/11/edm",
-    ]
-    for ns in edm_namespaces:
-        ns_tag = f"{{{ns}}}EntityType"
-        found = False
-        for etype in root.iter(ns_tag):
-            found = True
-            yield etype
-        if found:
-            return  # первый совпавший namespace используем
-    # Fallback: искать EntityType без namespace
-    for etype in root.iter("EntityType"):
-        yield etype
-
-
-def _iter_properties(etype: ET.Element):
-    """Итератор по Property внутри EntityType (любой namespace)."""
-    for child in etype:
-        tag = child.tag
-        # Извлечь локальное имя тега без namespace
-        local = tag.split("}")[-1] if "}" in tag else tag
-        if local == "Property":
-            yield child
-
-
-def _parse_metadata_xml(xml_text: str) -> list[dict]:
-    """Разбор XML $metadata → список {'name':..., 'label':...}."""
-    entities: list[dict] = []
+async def fetch_metadata_from_server(
+    odata_url: str,
+    auth_header: str,
+    timeout: int = 30,
+) -> str | None:
+    """Загрузить $metadata с сервера 1С через :class:`ODataClient`."""
     try:
-        root = ET.fromstring(xml_text)
-        for etype in _iter_entity_types(root):
-            name = etype.get("Name", "")
-            label = ""
-            for prop in _iter_properties(etype):
-                pname = prop.get("Name", "")
-                if pname == "Description":
-                    label = f"  (имеет Description)"
-                    break
-            entities.append({"name": name, "label": label})
-    except ET.ParseError as e:
-        log.error("Ошибка разбора $metadata: %s", e)
-    return entities
-
-
-def _parse_entity_fields(xml_text: str, entity_name: str) -> list[str]:
-    """Извлечь имена свойств EntityType из XML."""
-    fields: list[str] = []
-    try:
-        root = ET.fromstring(xml_text)
-        for etype in _iter_entity_types(root):
-            if etype.get("Name") == entity_name:
-                for child in etype:
-                    tag = child.tag
-                    local = tag.split("}")[-1] if "}" in tag else tag
-                    if local in ("Property", "NavigationProperty"):
-                        pname = child.get("Name")
-                        if pname:
-                            fields.append(pname)
-                break
-    except ET.ParseError as e:
-        log.warning("Ошибка разбора XML при извлечении полей '%s': %s", entity_name, e)
-    return fields
-
-
-async def fetch_metadata_from_server(odata_url: str, auth_header: str, timeout: int = 30) -> str | None:
-    """Загрузить $metadata с сервера 1С."""
-    meta_url = odata_url.rstrip("/") + "/$metadata"
-    try:
-        async with httpx.AsyncClient(verify=False, timeout=timeout) as client:
-            resp = await client.get(meta_url, headers={"Authorization": auth_header})
-            resp.raise_for_status()
-            return resp.text
-    except Exception as e:
-        log.error("Не удалось загрузить $metadata: %s", e)
+        async with ODataClient(
+            base_url=odata_url,
+            auth_header=auth_header,
+            timeout=timeout,
+            verify_ssl=False,
+        ) as client:
+            return await client.get_metadata()
+    except ODataHTTPError as e:
+        log.error("HTTP %s при загрузке $metadata: %s", e.status_code, e)
+        return None
+    except ODataConnectionError as e:
+        log.error("Не удалось подключиться к 1С для загрузки $metadata: %s", e)
+        return None
+    except ODataError as e:
+        log.error("Ошибка OData при загрузке $metadata: %s", e)
+        return None
+    except Exception:
+        log.exception("Непредвиденная ошибка при загрузке $metadata")
         return None
 
 
@@ -112,9 +64,16 @@ async def fetch_metadata_from_server(odata_url: str, auth_header: str, timeout: 
 # ---------------------------------------------------------------------------
 
 class MetadataCache:
-    """Кэш сущностей и полей 1С OData."""
+    """Кэш сущностей и полей 1С OData.
 
-    def __init__(self, cache_dir: str = ".cache", cache_seconds: int = DEFAULT_METADATA_CACHE_SECONDS) -> None:
+    Парсинг делегирует функциям из :mod:`lib.metadata_parser`.
+    """
+
+    def __init__(
+        self,
+        cache_dir: str = ".cache",
+        cache_seconds: int = DEFAULT_METADATA_CACHE_SECONDS,
+    ) -> None:
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self._cache_seconds = cache_seconds
@@ -161,9 +120,9 @@ class MetadataCache:
     # -- loading --
 
     def parse_and_store(self, xml_text: str) -> list[dict]:
-        """Разобрать XML и сохранить в кэш."""
+        """Разобрать XML через :mod:`lib.metadata_parser` и сохранить в кэш."""
         self._xml_raw = xml_text
-        self._entities = _parse_metadata_xml(xml_text)
+        self._entities = _parse_entity_sets(xml_text)
         self._loaded_at = time.time()
         self.save_to_disk()
         return self._entities
@@ -175,7 +134,7 @@ class MetadataCache:
         return self._entities
 
     def get_entity_fields(self, entity_name: str) -> list[str]:
-        """Получить список полей сущности."""
+        """Получить список полей сущности (через :mod:`lib.metadata_parser`)."""
         if not self._xml_raw:
             return []
         return _parse_entity_fields(self._xml_raw, entity_name)
@@ -190,29 +149,8 @@ class MetadataCache:
     ]
 
     def search_entities(self, query: str, top: int = 20) -> list[str]:
-        """Нечёткий поиск сущностей по ключевому слову.
-
-        Ищет вхождение query (case-insensitive) в имя сущности.
-        Если query пустой — возвращает все имена (до top).
-        """
-        if not self._entities:
-            return []
-        q_lower = query.lower().strip()
-        results: list[str] = []
-        # Приоритет 1: точное вхождение query в имя
-        for e in self._entities:
-            name = e["name"]
-            if q_lower and q_lower in name.lower():
-                results.append(name)
-                if len(results) >= top:
-                    return results
-        # Приоритет 2: если ничего не найдено — попробовать без префикса типа
-        if not results and "_" in q_lower:
-            # "Document_Увольнение" → "Увольнение"
-            short = q_lower.split("_", 1)[-1]
-            if short != q_lower:
-                return self.search_entities(short, top=top)
-        return results
+        """Нечёткий поиск сущностей (делегирует :func:`lib.metadata_parser.search_entities`)."""
+        return _search_entities(self._entities, query, top=top)
 
     def format_entity_list(self) -> str:
         """Форматировать список сущностей для промпта.

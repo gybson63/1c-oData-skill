@@ -34,8 +34,11 @@ from telegram.error import BadRequest, TimedOut
 from bot.agents.base import BaseAgent
 from bot.agents.odata import ODataAgent
 from bot.agents.formatter import FormatterAgent
+from bot.config import load_settings, get_settings, build_global_config
+from bot.history import HistoryManager
 from bot.logging_config import setup_logging
-from bot.utils import RateLimiter, load_config, sanitize_telegram_html
+from bot.utils import RateLimiter, sanitize_telegram_html
+from bot_lib.exceptions import ODataSkillError, ODataError, AIError, ConfigError
 
 log = logging.getLogger(__name__)
 
@@ -43,17 +46,8 @@ log = logging.getLogger(__name__)
 # Global state
 # ---------------------------------------------------------------------------
 
-_cfg: dict[str, Any] = {}
 _agents: dict[str, BaseAgent] = {}  # name → agent instance
-_history: dict[int, list[dict[str, str]]] = {}  # chat_id → messages
-_cache_dir: str = ".cache"
-_env_file: str = "env.json"
-
-# Настройки со значениями по умолчанию (переопределяются из env.json)
-_tg_message_max_length: int = 4000
-_tg_retry_count: int = 2
-_tg_retry_delay: int = 2
-_tg_polling_restart_delay: int = 5
+_history_mgr: HistoryManager | None = None  # управляет историей чатов
 
 AGENT_REGISTRY: dict[str, type[BaseAgent]] = {
     "odata": ODataAgent,
@@ -168,6 +162,8 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "",
         "/refresh — обновить метаданные 1С",
         "/status — статус агентов",
+        "/clear — очистить историю диалога",
+        "/history — статистика истории",
     ]
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
@@ -188,6 +184,42 @@ async def handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 lines.append(f"   {k}: <code>{v}</code>")
         lines.append("")
 
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+async def handle_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Команда /clear — очистить историю диалога."""
+    if not _history_mgr:
+        await update.message.reply_text("⚠️ Менеджер истории не инициализирован.")
+        return
+
+    chat_id = update.effective_chat.id
+    _history_mgr.clear(chat_id)
+    await update.message.reply_text("🗑 История диалога очищена.")
+
+
+async def handle_history_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Команда /history — показать статистику истории."""
+    if not _history_mgr:
+        await update.message.reply_text("⚠️ Менеджер истории не инициализирован.")
+        return
+
+    chat_id = update.effective_chat.id
+    history = _history_mgr.get(chat_id)
+    total_chats = _history_mgr.chat_count()
+    total_msgs = _history_mgr.total_messages()
+
+    lines = [
+        "📜 <b>Статистика истории</b>",
+        "",
+        f"Сообщений в этом чате: <b>{len(history)}</b>",
+        f"Всего чатов с историей: <b>{total_chats}</b>",
+        f"Всего сообщений: <b>{total_msgs}</b>",
+        "",
+        f"Лимит сообщений на чат: {_history_mgr._max}",
+        f"Обрезка до: {_history_mgr._trim_to}",
+        f"Персистентность: {'✅ да' if _history_mgr._persist_dir else '❌ нет'}",
+    ]
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
@@ -225,14 +257,35 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text("⚠️ Нет доступных агентов для обработки запроса.")
         return
 
-    # Получить историю
-    history = _history.get(chat_id, [])
+    # Получить историю через HistoryManager
+    if not _history_mgr:
+        log.error("HistoryManager не инициализирован")
+        await update.message.reply_text("⚠️ Внутренняя ошибка: менеджер истории не готов.")
+        return
+    history = _history_mgr.get(chat_id)
 
     # Обработка основным агентом
-    answer, updated_history = await agent.process_message(user_text, history)
+    try:
+        answer, updated_history = await agent.process_message(user_text, history)
+    except ODataError as e:
+        log.error("OData error in chat %s: %s", chat_id, e)
+        await update.message.reply_text(f"⚠️ Ошибка OData: {e}")
+        return
+    except AIError as e:
+        log.error("AI error in chat %s: %s", chat_id, e)
+        await update.message.reply_text(f"⚠️ Ошибка AI: {e}")
+        return
+    except ODataSkillError as e:
+        log.error("Internal error in chat %s: %s", chat_id, e)
+        await update.message.reply_text(f"⚠️ Внутренняя ошибка: {e}")
+        return
+    except Exception as e:
+        log.exception("Unexpected error in chat %s", chat_id)
+        await update.message.reply_text(f"⚠️ Непредвиденная ошибка: {e}")
+        return
 
-    # Сохранить историю
-    _history[chat_id] = updated_history
+    # Сохранить историю через HistoryManager (с автоматической обрезкой и персистентностью)
+    _history_mgr.save(chat_id, updated_history)
 
     # Форматирование через FormatterAgent (если доступен)
     if _formatter and _formatter.is_initialized:
@@ -242,7 +295,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             log.warning("FormatterAgent: ошибка форматирования (%s), отправляю как есть", e)
 
     # Truncate (Telegram limit: 4096 chars)
-    max_len = _tg_message_max_length
+    settings = get_settings()
+    max_len = settings.telegram.message_max_length
     if len(answer) > max_len:
         answer = answer[:max_len] + "... (сообщение сокращено)"
 
@@ -265,10 +319,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             log.error("Telegram не удалось отправить даже plain text")
     except TimedOut:
         # Ретри при таймауте
+        tg_settings = get_settings().telegram
         sent = False
-        for attempt in range(_tg_retry_count):
-            log.warning("Telegram reply_text TimedOut, retry %d/%d", attempt + 1, _tg_retry_count)
-            await asyncio.sleep(_tg_retry_delay)
+        for attempt in range(tg_settings.retry_count):
+            log.warning("Telegram reply_text TimedOut, retry %d/%d", attempt + 1, tg_settings.retry_count)
+            await asyncio.sleep(tg_settings.retry_delay)
             try:
                 await update.message.reply_text(safe_answer, parse_mode="HTML")
                 sent = True
@@ -291,10 +346,29 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def post_init(application) -> None:
     """Called after the Telegram app is fully initialized."""
-    global _cfg
+    settings = get_settings()
 
-    profile_cfg = _cfg
-    await init_agents(profile_cfg, _cache_dir, _env_file)
+    # Собираем legacy-совместимый dict для init_agents
+    profile_cfg: dict[str, Any] = {
+        "agents": settings.agents_config,
+        "formatter": settings.formatter.model_dump(),
+        **build_global_config(settings),
+    }
+
+    # Инициализировать HistoryManager с настройками
+    global _history_mgr
+    hs = settings.history
+    _history_mgr = HistoryManager(
+        max_messages=hs.max_messages,
+        trim_to=hs.trim_to,
+        persist_dir=hs.persist_dir,
+    )
+    log.info(
+        "HistoryManager: max_messages=%d, trim_to=%d, persist_dir=%s",
+        hs.max_messages, hs.trim_to, hs.persist_dir or "(in-memory)",
+    )
+
+    await init_agents(profile_cfg, settings.cache_dir, "env.json")
 
     # Log status
     if _agents:
@@ -313,9 +387,6 @@ async def post_shutdown(application) -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    global _cfg, _cache_dir, _env_file
-    global _tg_message_max_length, _tg_retry_count, _tg_retry_delay, _tg_polling_restart_delay
-
     _ROOT = Path(__file__).parent.parent
     parser = argparse.ArgumentParser(description="1С Telegram Bot (Multi-Agent)")
     parser.add_argument("--env-file", default=str(_ROOT / "env.json"))
@@ -325,30 +396,26 @@ def main() -> None:
     parser.add_argument("--log-file", default=None, help="Путь к файлу лога (поворот 5 МБ)")
     args = parser.parse_args()
 
-    setup_logging(level=args.log_level, log_file=args.log_file)
+    # Загрузить типизированную конфигурацию через Pydantic Settings
+    settings = load_settings(env_file=args.env_file, profile=args.profile)
 
-    _env_file = args.env_file
-    _cache_dir = args.cache_dir
+    # Настроить логирование (используем уровень из конфига, CLI имеет приоритет)
+    log_level = args.log_level or settings.log_level
+    log_file = args.log_file or settings.log_file
+    setup_logging(level=log_level, log_file=log_file)
 
-    _cfg = load_config(args.env_file, args.profile)
-
-    # Telegram-настройки из конфигурации
-    tg_cfg = _cfg.get("telegram", {})
-    _tg_message_max_length = tg_cfg.get("message_max_length", 4000)
-    _tg_retry_count = tg_cfg.get("retry_count", 2)
-    _tg_retry_delay = tg_cfg.get("retry_delay", 2)
-    _tg_polling_restart_delay = tg_cfg.get("polling_restart_delay", 5)
-
-    connect_timeout = tg_cfg.get("connect_timeout", 30)
-    read_timeout = tg_cfg.get("read_timeout", 120)
-    write_timeout = tg_cfg.get("write_timeout", 60)
+    tg = settings.telegram
 
     # Увеличенные таймауты для Telegram API (default ~10s слишком мало при долгой обработке)
-    request = HTTPXRequest(connect_timeout=connect_timeout, read_timeout=read_timeout, write_timeout=write_timeout)
+    request = HTTPXRequest(
+        connect_timeout=tg.connect_timeout,
+        read_timeout=tg.read_timeout,
+        write_timeout=tg.write_timeout,
+    )
 
     app = (
         ApplicationBuilder()
-        .token(_cfg["telegram_token"])
+        .token(settings.bot.token)
         .post_init(post_init)
         .post_shutdown(post_shutdown)
         .request(request)
@@ -357,6 +424,8 @@ def main() -> None:
     app.add_handler(CommandHandler("start", handle_start))
     app.add_handler(CommandHandler("status", handle_status))
     app.add_handler(CommandHandler("refresh", handle_refresh))
+    app.add_handler(CommandHandler("clear", handle_clear))
+    app.add_handler(CommandHandler("history", handle_history_stats))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(error_handler)
 
@@ -368,7 +437,7 @@ def main() -> None:
         except (TimedOut, TimeoutError) as e:
             log.warning("Polling error (restart): %s", e)
             import time
-            time.sleep(_tg_polling_restart_delay)
+            time.sleep(tg.polling_restart_delay)
             continue
         break
 

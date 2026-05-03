@@ -236,6 +236,11 @@ bot/
     formatter/
       agent_formatter.py      — FormatterAgent (Telegram HTML-форматирование)
       prompts.py              — промпт форматтера
+bot_lib/
+  __init__.py
+  exceptions.py
+  metadata_parser.py
+  odata_client.py
 mcp_servers/
   odata_server.py             — MCP-сервер для 1С OData API
 skills/

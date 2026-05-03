@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""HTTP-функции для запросов к OData 1С."""
+"""HTTP-функции для запросов к OData 1С.
+
+Делегирует реальную HTTP-работу :class:`lib.odata_client.ODataClient`,
+сохраняя обратную совместимость с остальным кодом бота.
+"""
 
 from __future__ import annotations
 
@@ -7,18 +11,15 @@ import logging
 from typing import Any, Optional
 from urllib.parse import quote
 
-import httpx
+from bot_lib.exceptions import ODataError
+from bot_lib.odata_client import ODataClient
 
 log = logging.getLogger(__name__)
 
 
-class ODataError(Exception):
-    """Ошибка OData-запроса."""
-
-    def __init__(self, message: str, status_code: int = 0) -> None:
-        super().__init__(message)
-        self.status_code = status_code
-
+# ---------------------------------------------------------------------------
+# Обратно-совместимая функция, используемая agent_1c_odata.py
+# ---------------------------------------------------------------------------
 
 async def execute_odata_query(
     odata_url: str,
@@ -35,84 +36,77 @@ async def execute_odata_query(
 ) -> tuple[list[dict], int]:
     """Выполнить OData-запрос к 1С.
 
+    Создаёт временный :class:`ODataClient` на каждый вызов
+    (обратная совместимость с текущим кодом агента).
+
     Args:
-        expand: список навигационных свойств через запятую для $expand
-            (например "Сотрудник,Организация").
-        request_timeout: таймаут HTTP-запроса в секундах.
-        max_url_length: максимальная длина URL (превышение → обрезка $expand/$select).
+        odata_url: базовый URL OData
+        auth_header: заголовок ``Authorization`` (``Basic ...``)
+        entity: имя набора сущностей
+        filter_expr: OData ``$filter``
+        select: OData ``$select`` (значение или ``$select=...``)
+        orderby: OData ``$orderby`` (значение или ``$orderby=...``)
+        top: OData ``$top``
+        count: если ``True`` — запрос ``/$count``
+        expand: OData ``$expand``
+        request_timeout: таймаут HTTP в секундах
+        max_url_length: максимальная длина URL
 
     Returns:
-        Кортеж (records, total_count):
-          - records: список записей (пустой при count=True)
-          - total_count: количество при count=True, иначе 0
+        Кортеж ``(records, total_count)``.
     """
-    if count:
-        url = f"{odata_url.rstrip('/')}/{quote(entity, safe='')}/$count"
-        params: list[tuple[str, str]] = [("$format", "json")]
-        if filter_expr:
-            params.append(("$filter", filter_expr))
-        url_str = url + "?" + "&".join(f"{k}={quote(v, safe='')}" for k, v in params)
+    # Нормализуем параметры — убираем префиксы "$select=" / "$orderby="
+    clean_select = select
+    if clean_select and clean_select.startswith("$select="):
+        clean_select = clean_select[len("$select="):]
 
-        async with httpx.AsyncClient(verify=False, timeout=request_timeout) as client:
-            resp = await client.get(url_str, headers={"Authorization": auth_header})
+    clean_orderby = orderby
+    if clean_orderby and clean_orderby.startswith("$orderby="):
+        clean_orderby = clean_orderby[len("$orderby="):]
 
-        if resp.status_code != 200:
-            raise ODataError(f"OData /$count error: {resp.status_code} {resp.text[:500]}", resp.status_code)
+    clean_expand = expand
+    if clean_expand and clean_expand.startswith("$expand="):
+        clean_expand = clean_expand[len("$expand="):]
 
-        total = int(resp.text.strip())
-        return [], total
+    try:
+        async with ODataClient(
+            base_url=odata_url,
+            auth_header=auth_header,
+            timeout=request_timeout,
+            verify_ssl=False,
+            max_url_length=max_url_length,
+        ) as client:
+            if count:
+                total = await client.get_count(entity, filter_=filter_expr)
+                return [], total
 
-    # Обычный запрос
-    url = f"{odata_url.rstrip('/')}/{quote(entity, safe='')}"
-    params = [("$format", "json")]
-    if filter_expr:
-        params.append(("$filter", filter_expr))
-    if select:
-        raw = select[len("$select="):] if select.startswith("$select=") else select
-        params.append(("$select", raw))
-    if orderby:
-        raw = orderby[len("$orderby="):] if orderby.startswith("$orderby=") else orderby
-        params.append(("$orderby", raw))
-    if top:
-        params.append(("$top", str(top)))
-    if expand:
-        raw_expand = expand[len("$expand="):] if expand.startswith("$expand=") else expand
-        params.append(("$expand", raw_expand))
+            data = await client.get_entities(
+                entity=entity,
+                filter_=filter_expr,
+                select=clean_select,
+                orderby=clean_orderby,
+                top=top,
+                expand=clean_expand,
+            )
 
-    url_str = url + "?" + "&".join(f"{k}={quote(v, safe='')}" for k, v in params)
+            records = data.get("value", [])
 
-    # Защита от слишком длинного URL (IIS 404.15)
-    if len(url_str) > max_url_length and expand:
-        # Попробовать убрать $expand
-        log.warning("URL слишком длинный (%d > %d), убираем $expand", len(url_str), max_url_length)
-        params_no_expand = [(k, v) for k, v in params if k != "$expand"]
-        url_str = url + "?" + "&".join(f"{k}={quote(v, safe='')}" for k, v in params_no_expand)
-        if len(url_str) > max_url_length and select:
-            # Если всё ещё длинный — убрать и $select
-            log.warning("URL всё ещё длинный (%d), убираем $select", len(url_str))
-            params_no_select = [(k, v) for k, v in params_no_expand if k != "$select"]
-            url_str = url + "?" + "&".join(f"{k}={quote(v, safe='')}" for k, v in params_no_select)
+            # Извлечь inline count
+            total_str = data.get("odata.count") or data.get("@odata.count")
+            total = int(total_str) if total_str else len(records)
 
-    log.info("OData GET: %s", url_str)
+            log.info(
+                "OData response: records=%d, total=%s",
+                len(records), total,
+            )
+            if records:
+                log.info("OData first record keys: %s", list(records[0].keys())[:10])
+            else:
+                log.warning("OData вернул 0 записей")
 
-    async with httpx.AsyncClient(verify=False, timeout=request_timeout) as client:
-        resp = await client.get(url_str, headers={"Authorization": auth_header})
+            return records, total
 
-    if resp.status_code != 200:
-        raise ODataError(f"OData error: {resp.status_code} {resp.text[:500]}", resp.status_code)
-
-    data = resp.json()
-    records = data.get("value", [])
-
-    # Попробуем извлечь inline count
-    total_str = data.get("odata.count")
-    total = int(total_str) if total_str else len(records)
-
-    log.info("OData response: status=%d, records=%d, total=%s", resp.status_code, len(records), total)
-    if records:
-        import json
-        log.info("OData first record keys: %s", list(records[0].keys())[:10])
-    else:
-        log.warning("OData вернул 0 записей. Полный ответ: %s", resp.text[:500])
-
-    return records, total
+    except ODataError:
+        raise
+    except Exception as exc:
+        raise ODataError(f"Ошибка OData-запроса: {exc}") from exc
