@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     import tenacity
 
 from bot_lib.exceptions import ODataConnectionError, ODataHTTPError
+from bot.metrics import metrics, track_time
 
 logger = logging.getLogger(__name__)
 
@@ -142,7 +143,9 @@ class ODataClient:
         path = f"/{entity}"
         url = self._safe_url(path, params)
         logger.info("OData GET %s", url)
-        return await self._request_json("GET", path, params=params)
+        metrics.increment("odata_requests")
+        async with track_time("odata_get_entities"):
+            return await self._request_json("GET", path, params=params)
 
     async def get_count(
         self,
@@ -160,7 +163,9 @@ class ODataClient:
             params["$filter"] = filter_
 
         logger.info("OData GET %s", path)
-        response = await self._request_raw("GET", path, params=params)
+        metrics.increment("odata_requests")
+        async with track_time("odata_get_count"):
+            response = await self._request_raw("GET", path, params=params)
         return int(response.text.strip())
 
     async def get_metadata(self) -> str:
@@ -170,11 +175,13 @@ class ODataClient:
             Строка с XML-содержимым $metadata.
         """
         logger.info("OData GET /$metadata")
-        response = await self._request_raw(
-            "GET",
-            "/$metadata",
-            headers={"Accept": "application/xml"},
-        )
+        metrics.increment("odata_requests")
+        async with track_time("odata_get_metadata"):
+            response = await self._request_raw(
+                "GET",
+                "/$metadata",
+                headers={"Accept": "application/xml"},
+            )
         return response.text
 
     async def raw_request(

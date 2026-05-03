@@ -39,6 +39,7 @@ from bot.agents.formatter import FormatterAgent
 from bot.config import load_settings, get_settings, build_global_config
 from bot.history import HistoryManager
 from bot.logging_config import setup_logging
+from bot.metrics import metrics as app_metrics
 from bot.utils import RateLimiter, sanitize_telegram_html
 from bot_lib.exceptions import ODataSkillError, ODataError, AIError, ConfigError
 
@@ -207,6 +208,7 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "",
         "/refresh — обновить метаданные 1С",
         "/status — статус агентов",
+        "/metrics — метрики производительности и AI-usage",
         "/clear — очистить историю диалога",
         "/history — статистика истории",
     ]
@@ -272,6 +274,12 @@ async def handle_history_stats(update: Update, context: ContextTypes.DEFAULT_TYP
         f"Персистентность: {'✅ да' if _history_mgr._persist_dir else '❌ нет'}",
     ]
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+async def handle_metrics(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Команда /metrics — показать метрики производительности и AI-usage."""
+    report = app_metrics.format_report()
+    await update.message.reply_text(report, parse_mode="HTML")
 
 
 async def handle_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -546,6 +554,7 @@ def main() -> None:
     app.add_handler(CommandHandler("start", handle_start))
     app.add_handler(CommandHandler("status", handle_status))
     app.add_handler(CommandHandler("refresh", handle_refresh))
+    app.add_handler(CommandHandler("metrics", handle_metrics))
     app.add_handler(CommandHandler("clear", handle_clear))
     app.add_handler(CommandHandler("history", handle_history_stats))
     app.add_handler(CallbackQueryHandler(handle_pagination_callback, pattern=r"^page:\d+$"))

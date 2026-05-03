@@ -23,6 +23,7 @@ from typing import Any, Optional
 from openai import AsyncOpenAI, BadRequestError
 
 from bot.config import get_settings
+from bot.metrics import metrics, track_time
 from bot.utils import RateLimiter, esc_html
 
 from bot.agents.base import BaseAgent
@@ -300,6 +301,26 @@ class ODataAgent(BaseAgent):
             return AIRateLimitError(f"Превышен лимит запросов: {exc}")
         return AIError(f"Ошибка AI-сервиса: {exc}")
 
+    def _track_ai_response(self, response, step: str) -> None:
+        """Извлечь usage из ответа AI и записать в метрики."""
+        usage = getattr(response, "usage", None)
+        if usage:
+            settings = get_settings()
+            pricing = settings.ai_pricing
+            metrics.track_ai_usage(
+                model=self._model,
+                input_tokens=usage.prompt_tokens or 0,
+                output_tokens=usage.completion_tokens or 0,
+                input_price_per_1m=pricing.input_per_1m,
+                output_price_per_1m=pricing.output_per_1m,
+            )
+            log.debug(
+                "AI usage [%s]: model=%s in=%d out=%d",
+                step, self._model,
+                usage.prompt_tokens or 0,
+                usage.completion_tokens or 0,
+            )
+
     async def _step1_call_ai(
         self,
         messages: list[dict],
@@ -315,12 +336,17 @@ class ODataAgent(BaseAgent):
             kwargs["tools"] = self._tools
             kwargs["tool_choice"] = "auto"
 
-        try:
-            return await self._ai_client.chat.completions.create(**kwargs)  # type: ignore[union-attr]
-        except BadRequestError as exc:
-            raise
-        except Exception as exc:
-            raise self._wrap_ai_error(exc) from exc
+        metrics.increment("ai_requests_step1")
+        async with track_time("ai_step1"):
+            try:
+                resp = await self._ai_client.chat.completions.create(**kwargs)  # type: ignore[union-attr]
+            except BadRequestError as exc:
+                raise
+            except Exception as exc:
+                raise self._wrap_ai_error(exc) from exc
+
+        self._track_ai_response(resp, "step1")
+        return resp
 
     # -- tool call handling --
 
@@ -819,14 +845,18 @@ class ODataAgent(BaseAgent):
         if self._rate_limiter:
             await self._rate_limiter.wait()
 
-        try:
-            resp = await self._ai_client.chat.completions.create(  # type: ignore[union-attr]
-                model=self._model,
-                messages=messages,  # type: ignore[arg-type]
-                temperature=self._step2_temperature,
-            )
-        except Exception as exc:
-            raise self._wrap_ai_error(exc) from exc
+        metrics.increment("ai_requests_step2")
+        async with track_time("ai_step2"):
+            try:
+                resp = await self._ai_client.chat.completions.create(  # type: ignore[union-attr]
+                    model=self._model,
+                    messages=messages,  # type: ignore[arg-type]
+                    temperature=self._step2_temperature,
+                )
+            except Exception as exc:
+                raise self._wrap_ai_error(exc) from exc
+
+        self._track_ai_response(resp, "step2")
 
         content = resp.choices[0].message.content
         if not content:

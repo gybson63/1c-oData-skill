@@ -14,6 +14,7 @@ from typing import Any, Optional
 from openai import AsyncOpenAI
 
 from bot.config import get_settings
+from bot.metrics import metrics, track_time
 from bot.utils import RateLimiter
 from bot.agents.base import BaseAgent
 from bot_lib.exceptions import AIResponseError, AIRateLimitError
@@ -121,14 +122,35 @@ class FormatterAgent(BaseAgent):
         if self._rate_limiter:
             await self._rate_limiter.wait()
 
-        try:
-            resp = await self._ai_client.chat.completions.create(
+        metrics.increment("ai_requests_formatter")
+        async with track_time("ai_formatter"):
+            try:
+                resp = await self._ai_client.chat.completions.create(
+                    model=self._model,
+                    messages=messages,  # type: ignore[arg-type]
+                    temperature=self._temperature,
+                )
+            except Exception as exc:
+                raise AIRateLimitError(f"AI API error in formatter: {exc}") from exc
+
+        # Track AI usage (tokens + cost)
+        usage = getattr(resp, "usage", None)
+        if usage:
+            settings = get_settings()
+            pricing = settings.ai_pricing
+            metrics.track_ai_usage(
                 model=self._model,
-                messages=messages,  # type: ignore[arg-type]
-                temperature=self._temperature,
+                input_tokens=usage.prompt_tokens or 0,
+                output_tokens=usage.completion_tokens or 0,
+                input_price_per_1m=pricing.input_per_1m,
+                output_price_per_1m=pricing.output_per_1m,
             )
-        except Exception as exc:
-            raise AIRateLimitError(f"AI API error in formatter: {exc}") from exc
+            log.debug(
+                "AI usage [formatter]: model=%s in=%d out=%d",
+                self._model,
+                usage.prompt_tokens or 0,
+                usage.completion_tokens or 0,
+            )
 
         try:
             formatted = resp.choices[0].message.content or raw_answer
