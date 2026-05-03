@@ -397,6 +397,12 @@ async def handle_pagination_callback(update: Update, context: ContextTypes.DEFAU
     query = update.callback_query
     await query.answer()
 
+    # Мгновенная обратная связь — показать «Загрузка» до завершения запроса
+    try:
+        await query.edit_message_text("⏳ <i>Загрузка данных...</i>", parse_mode="HTML")
+    except Exception:
+        pass  # сообщение могло уже измениться — не критично
+
     chat_id = update.effective_chat.id
     data = query.data or ""
 
