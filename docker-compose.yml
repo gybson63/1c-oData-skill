@@ -1,0 +1,28 @@
+# docker-compose.yml for 1c-oData-skill Telegram Bot
+#
+# Usage:
+#   docker compose up --build          # build & start
+#   docker compose up -d               # start in background
+#   docker compose logs -f bot         # follow logs
+#   docker compose down                # stop & remove containers
+#
+# Configuration:
+#   1. Copy env.example.json → env.json and fill in your credentials
+#   2. Run: docker compose up --build
+
+services:
+  bot:
+    build: .
+    restart: unless-stopped
+    volumes:
+      # Configuration file (read-only mount)
+      - ./env.json:/app/env.json:ro
+      # Persistent data (named volumes survive container rebuilds)
+      - bot-cache:/app/.cache
+      - bot-logs:/app/logs
+    environment:
+      - LOG_LEVEL=INFO
+
+volumes:
+  bot-cache:
+  bot-logs:

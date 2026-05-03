@@ -11,6 +11,7 @@ import asyncio
 import argparse
 import json
 import logging
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -20,9 +21,10 @@ _PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     ApplicationBuilder,
+    CallbackQueryHandler,
     ContextTypes,
     CommandHandler,
     MessageHandler,
@@ -37,6 +39,7 @@ from bot.agents.formatter import FormatterAgent
 from bot.config import load_settings, get_settings, build_global_config
 from bot.history import HistoryManager
 from bot.logging_config import setup_logging
+from bot.metrics import metrics as app_metrics
 from bot.utils import RateLimiter, sanitize_telegram_html
 from bot_lib.exceptions import ODataSkillError, ODataError, AIError, ConfigError
 
@@ -147,6 +150,49 @@ def _default_agent() -> BaseAgent | None:
 
 
 # ---------------------------------------------------------------------------
+# Pagination helpers
+# ---------------------------------------------------------------------------
+
+def _extract_pagination_context(history: list[dict]) -> dict | None:
+    """Извлечь контекст пагинации из **последнего** assistant-сообщения в истории.
+
+    Проверяем только самое последнее сообщение — иначе при ошибочном ответе
+    (не JSON) функция найдёт pagination-контекст от предыдущего успешного
+    запроса и покажет кнопку «Следующие» на ошибке.
+    """
+    if not history:
+        return None
+    # Берём только последнее assistant-сообщение
+    for msg in reversed(history):
+        if msg.get("role") == "assistant":
+            content = msg.get("content", "")
+            try:
+                data = json.loads(content)
+                if isinstance(data, dict) and "entity" in data:
+                    return data
+            except (json.JSONDecodeError, TypeError):
+                pass
+            break  # проверяем только последнее — не идём дальше в историю
+    return None
+
+
+def _build_pagination_keyboard(pagination_ctx: dict | None) -> InlineKeyboardMarkup | None:
+    """Построить inline-клавиатуру для пагинации, если есть ещё записи."""
+    if not pagination_ctx:
+        return None
+    total = pagination_ctx.get("total", 0)
+    skip = pagination_ctx.get("skip", 0)
+    shown = pagination_ctx.get("shown", 0)
+    if skip + shown < total:
+        top = pagination_ctx.get("top", 20)
+        next_skip = skip + top
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("➡️ Следующие", callback_data=f"page:{next_skip}")],
+        ])
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Telegram handlers
 # ---------------------------------------------------------------------------
 
@@ -162,6 +208,7 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "",
         "/refresh — обновить метаданные 1С",
         "/status — статус агентов",
+        "/metrics — метрики производительности и AI-usage",
         "/clear — очистить историю диалога",
         "/history — статистика истории",
     ]
@@ -195,6 +242,12 @@ async def handle_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     chat_id = update.effective_chat.id
     _history_mgr.clear(chat_id)
+
+    # Сбросить контекст пагинации
+    agent = _agents.get("odata")
+    if agent and isinstance(agent, ODataAgent):
+        agent.clear_pagination_state(chat_id)
+
     await update.message.reply_text("🗑 История диалога очищена.")
 
 
@@ -221,6 +274,12 @@ async def handle_history_stats(update: Update, context: ContextTypes.DEFAULT_TYP
         f"Персистентность: {'✅ да' if _history_mgr._persist_dir else '❌ нет'}",
     ]
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+async def handle_metrics(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Команда /metrics — показать метрики производительности и AI-usage."""
+    report = app_metrics.format_report()
+    await update.message.reply_text(report, parse_mode="HTML")
 
 
 async def handle_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -303,29 +362,34 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # Санитизация HTML перед отправкой
     safe_answer = sanitize_telegram_html(answer)
 
+    # Пагинация: проверить, есть ли ещё записи для показа
+    reply_markup = None
+    if isinstance(agent, ODataAgent):
+        pagination_ctx = _extract_pagination_context(updated_history)
+        if pagination_ctx:
+            agent.save_pagination_state(chat_id, pagination_ctx)
+            reply_markup = _build_pagination_keyboard(pagination_ctx)
+
     # Отправить: сначала с HTML, при BadRequest — plain text fallback
     try:
-        await update.message.reply_text(safe_answer, parse_mode="HTML")
+        await update.message.reply_text(safe_answer, parse_mode="HTML", reply_markup=reply_markup)
     except BadRequest as e:
         log.warning("Telegram BadRequest при HTML-отправке: %s. Отправляю plain text.", e)
         try:
-            # Убрать все HTML-теги для plain-text варианта
-            import re
             plain = re.sub(r"<[^>]+>", "", safe_answer)
             if len(plain) > max_len:
                 plain = plain[:max_len] + "... (сообщение сокращено)"
-            await update.message.reply_text(plain)
+            await update.message.reply_text(plain, reply_markup=reply_markup)
         except Exception:
             log.error("Telegram не удалось отправить даже plain text")
     except TimedOut:
-        # Ретри при таймауте
         tg_settings = get_settings().telegram
         sent = False
         for attempt in range(tg_settings.retry_count):
             log.warning("Telegram reply_text TimedOut, retry %d/%d", attempt + 1, tg_settings.retry_count)
             await asyncio.sleep(tg_settings.retry_delay)
             try:
-                await update.message.reply_text(safe_answer, parse_mode="HTML")
+                await update.message.reply_text(safe_answer, parse_mode="HTML", reply_markup=reply_markup)
                 sent = True
                 break
             except TimedOut:
@@ -334,6 +398,72 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 break
         if not sent:
             log.error("Telegram reply_text failed after retries (TimedOut)")
+
+
+async def handle_pagination_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработка inline-кнопок пагинации (callback query)."""
+    query = update.callback_query
+    await query.answer()
+
+    # Мгновенная обратная связь — показать «Загрузка» до завершения запроса
+    try:
+        await query.edit_message_text("⏳ <i>Загрузка данных...</i>", parse_mode="HTML")
+    except Exception:
+        pass  # сообщение могло уже измениться — не критично
+
+    chat_id = update.effective_chat.id
+    data = query.data or ""
+
+    # Разбор callback_data: "page:<skip>"
+    if not data.startswith("page:"):
+        await query.answer("Неизвестное действие", show_alert=True)
+        return
+
+    try:
+        skip = int(data.split(":")[1])
+    except (ValueError, IndexError):
+        await query.answer("Ошибка пагинации", show_alert=True)
+        return
+
+    # Найти OData-агент
+    agent = _agents.get("odata")
+    if not agent or not isinstance(agent, ODataAgent):
+        await query.edit_message_text("⚠️ Агент OData не доступен.")
+        return
+
+    # Выполнить запрос с новым skip
+    try:
+        answer, pagination_ctx = await agent.execute_page(chat_id, skip)
+    except Exception as e:
+        log.exception("Pagination error in chat %s", chat_id)
+        await query.edit_message_text(f"⚠️ Ошибка: {e}")
+        return
+
+    # Форматирование через FormatterAgent
+    if _formatter and _formatter.is_initialized:
+        try:
+            answer = await _formatter.format_response(answer, user_question="продолжение")
+        except Exception as e:
+            log.warning("FormatterAgent: ошибка при пагинации (%s)", e)
+
+    # Проверить, есть ли ещё страницы
+    reply_markup = _build_pagination_keyboard(pagination_ctx)
+
+    # Обновить сообщение
+    max_len = get_settings().telegram.message_max_length
+    if len(answer) > max_len:
+        answer = answer[:max_len] + "... (сообщение сокращено)"
+
+    safe_answer = sanitize_telegram_html(answer)
+
+    try:
+        await query.edit_message_text(safe_answer, parse_mode="HTML", reply_markup=reply_markup)
+    except BadRequest as e:
+        log.warning("Pagination edit BadRequest: %s. Sending new message.", e)
+        try:
+            await query.message.reply_text(safe_answer, parse_mode="HTML", reply_markup=reply_markup)
+        except Exception:
+            log.error("Pagination: не удалось отправить сообщение")
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -424,8 +554,10 @@ def main() -> None:
     app.add_handler(CommandHandler("start", handle_start))
     app.add_handler(CommandHandler("status", handle_status))
     app.add_handler(CommandHandler("refresh", handle_refresh))
+    app.add_handler(CommandHandler("metrics", handle_metrics))
     app.add_handler(CommandHandler("clear", handle_clear))
     app.add_handler(CommandHandler("history", handle_history_stats))
+    app.add_handler(CallbackQueryHandler(handle_pagination_callback, pattern=r"^page:\d+$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(error_handler)
 

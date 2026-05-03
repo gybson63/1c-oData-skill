@@ -321,7 +321,7 @@ class TestBuildParams:
         assert result["$top"] == 10
         assert result["$skip"] == 20
         assert result["$expand"] == "Items"
-        assert result["$count"] == "true"
+        assert result["$inlinecount"] == "allpages"
         assert result["$format"] == "json"
 
     def test_top_zero_omitted(self):

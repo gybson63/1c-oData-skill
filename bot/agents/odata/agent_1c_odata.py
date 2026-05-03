@@ -23,6 +23,7 @@ from typing import Any, Optional
 from openai import AsyncOpenAI, BadRequestError
 
 from bot.config import get_settings
+from bot.metrics import metrics, track_time
 from bot.utils import RateLimiter, esc_html
 
 from bot.agents.base import BaseAgent
@@ -57,6 +58,44 @@ class QueryError(Exception):
     pass
 
 
+# Маппинг кодов ошибок OData 1С на человекопонятные сообщения
+_ODATA_ERROR_CODES: dict[str, str] = {
+    "0":  "Параметр не поддерживается (возможна опечатка в имени параметра).",
+    "6":  "Метод не найден — проверьте имя виртуальной таблицы (слитно, без подчёркивания).",
+    "8":  "Тип сущности не найден — проверьте имя объекта (префикс_Имя).",
+    "9":  "Экземпляр сущности не найден — несуществующий GUID или ссылка.",
+    "14": "Ошибка разбора $filter — проверьте синтаксис фильтра.",
+}
+
+
+def _parse_odata_error_message(error: ODataError) -> str:
+    """Извлечь человекопонятное описание из OData-ошибки.
+
+    Пытается распарсить JSON-тело ответа с кодом ошибки 1С.
+    """
+    msg = error.message or ""
+    # Попытка найти JSON с odata.error в теле сообщения
+    import json as _json
+    try:
+        # HTTP-ошибка содержит тело ответа после двоеточия
+        body_start = msg.find("{")
+        if body_start != -1:
+            body = _json.loads(msg[body_start:])
+            err = body.get("odata.error") or body.get("error") or body
+            code = str(err.get("code", ""))
+            message_value = err.get("message", "")
+            if isinstance(message_value, dict):
+                message_value = message_value.get("value", "")
+            hint = _ODATA_ERROR_CODES.get(code)
+            if hint:
+                return f"{hint} ({message_value})" if message_value else hint
+            if message_value:
+                return str(message_value)
+    except Exception:
+        pass
+    return msg
+
+
 class ODataAgent(BaseAgent):
     """Агент для работы с 1С OData."""
 
@@ -85,6 +124,8 @@ class ODataAgent(BaseAgent):
         self._step2_temperature: float = _DEFAULT_STEP2_TEMPERATURE
         self._request_timeout: int = 60
         self._metadata_cache_seconds: int = 86400
+        # Контекст пагинации: chat_id → последний запрос
+        self._pagination_states: dict[int, dict[str, Any]] = {}
 
     # -- helpers --
 
@@ -206,7 +247,8 @@ class ODataAgent(BaseAgent):
             elif e.status_code >= 500:
                 answer = "🛑 <b>Ошибка сервера 1С.</b> Попробуйте позже."
             else:
-                answer = f"❌ <b>Не удалось подключиться к 1С:</b> {esc_html(str(e))}"
+                parsed = _parse_odata_error_message(e)
+                answer = f"❌ <b>Ошибка OData:</b> {esc_html(parsed)}"
             history.append({"role": "user", "content": user_text})
             history.append({"role": "assistant", "content": answer})
             return answer, history[-(self._history_max_turns * 2):]
@@ -259,6 +301,26 @@ class ODataAgent(BaseAgent):
             return AIRateLimitError(f"Превышен лимит запросов: {exc}")
         return AIError(f"Ошибка AI-сервиса: {exc}")
 
+    def _track_ai_response(self, response, step: str) -> None:
+        """Извлечь usage из ответа AI и записать в метрики."""
+        usage = getattr(response, "usage", None)
+        if usage:
+            settings = get_settings()
+            pricing = settings.ai_pricing
+            metrics.track_ai_usage(
+                model=self._model,
+                input_tokens=usage.prompt_tokens or 0,
+                output_tokens=usage.completion_tokens or 0,
+                input_price_per_1m=pricing.input_per_1m,
+                output_price_per_1m=pricing.output_per_1m,
+            )
+            log.debug(
+                "AI usage [%s]: model=%s in=%d out=%d",
+                step, self._model,
+                usage.prompt_tokens or 0,
+                usage.completion_tokens or 0,
+            )
+
     async def _step1_call_ai(
         self,
         messages: list[dict],
@@ -274,12 +336,17 @@ class ODataAgent(BaseAgent):
             kwargs["tools"] = self._tools
             kwargs["tool_choice"] = "auto"
 
-        try:
-            return await self._ai_client.chat.completions.create(**kwargs)  # type: ignore[union-attr]
-        except BadRequestError as exc:
-            raise
-        except Exception as exc:
-            raise self._wrap_ai_error(exc) from exc
+        metrics.increment("ai_requests_step1")
+        async with track_time("ai_step1"):
+            try:
+                resp = await self._ai_client.chat.completions.create(**kwargs)  # type: ignore[union-attr]
+            except BadRequestError as exc:
+                raise
+            except Exception as exc:
+                raise self._wrap_ai_error(exc) from exc
+
+        self._track_ai_response(resp, "step1")
+        return resp
 
     # -- tool call handling --
 
@@ -304,10 +371,81 @@ class ODataAgent(BaseAgent):
 
     # -- JSON extraction --
 
+    # Известные имена инструментов (function calling)
+    _TOOL_NAMES = frozenset({"odata_reference", "get_entity_fields", "search_entities"})
+
+    @classmethod
+    def _is_inline_tool_call(cls, parsed: dict) -> bool:
+        """Проверить, выглядит ли JSON как встроенный вызов инструмента.
+
+        Некоторые модели вместо function calling возвращают в content:
+          {"name": "search_entities", "arguments": {"query": "..."}}
+          {"function": "search_entities", "arguments": {"query": "..."}}
+        """
+        if not isinstance(parsed, dict) or "entity" in parsed:
+            return False
+        tool_name = parsed.get("name") or parsed.get("function")
+        return tool_name in cls._TOOL_NAMES and isinstance(parsed.get("arguments"), dict)
+
+    async def _resolve_inline_tool_call(
+        self,
+        messages: list[dict],
+        parsed: dict,
+        user_text: str,
+    ) -> dict:
+        """Обработать встроенный вызов инструмента и повторить запрос к AI.
+
+        Args:
+            messages: текущая история сообщений.
+            parsed: JSON вида {"name/function": "...", "arguments": {...}}.
+            user_text: оригинальный текст пользователя.
+
+        Returns:
+            Распарсенный OData-запрос (dict с entity/filter/...).
+        """
+        tool_name = parsed.get("name") or parsed.get("function") or ""
+        tool_args = parsed["arguments"]
+        log.warning("Обнаружен встроенный tool call в content: %s(%s)", tool_name, tool_args)
+
+        # Выполнить инструмент
+        result = self._handle_tool_call(tool_name, tool_args)
+        log.info("Inline tool result: %s", result[:300] if result else "")
+
+        # Добавить результат инструмента в контекст и повторить запрос
+        tool_msg = (
+            f"[Результат инструмента {tool_name}]: {result}\n\n"
+            f"Теперь построй OData-запрос JSON для: {user_text}"
+        )
+        messages.append({"role": "assistant", "content": json.dumps(parsed, ensure_ascii=False)})
+        messages.append({"role": "user", "content": tool_msg})
+
+        if self._rate_limiter:
+            await self._rate_limiter.wait()
+
+        resp = await self._step1_call_ai(messages, use_tools=self._tools_supported)
+        content = resp.choices[0].message.content or ""
+
+        # Обработать возможные tool_calls от повторного запроса
+        msg = resp.choices[0].message
+        if msg.tool_calls:
+            msg = await self._resolve_tool_calls(messages, msg)
+            content = msg.content or ""
+
+        query = self._extract_json(content)
+        if not query:
+            raise QueryError(
+                f"Не удалось разобрать запрос после вызова инструмента.\n\n"
+                f"<pre>{esc_html(content[:500])}</pre>"
+            )
+        return query
+
     @staticmethod
     def _extract_json(text: str) -> Optional[dict]:
         """Извлечь JSON из текста ответа AI."""
         text = text.strip()
+        # Убрать повторяющиеся префиксы вида "tool_calls:" перед JSON
+        # Некоторые модели пишут: tool_calls:{"function":"...","arguments":{...}}
+        text = re.sub(r'^(?:tool_calls:\s*)+', '', text)
         # Убрать markdown-обёртки
         if text.startswith("```"):
             lines = text.split("\n")
@@ -389,6 +527,11 @@ class ODataAgent(BaseAgent):
             )
 
         log.info("STEP1 parsed query: %s", json.dumps(query, ensure_ascii=False)[:500])
+
+        # Fallback: модель вернула tool call как JSON вместо function calling
+        if self._is_inline_tool_call(query):
+            query = await self._resolve_inline_tool_call(messages, query, user_text)
+            log.info("STEP1 after inline tool resolution: %s", json.dumps(query, ensure_ascii=False)[:500])
 
         entity = query.get("entity", "")
         if not entity:
@@ -472,6 +615,9 @@ class ODataAgent(BaseAgent):
     ) -> tuple[str, list[dict[str, str]]]:
         """Обработать запрос данных сущности."""
         top = min(int(query.get("top") or self._default_top), self._max_top)
+        skip = query.get("skip")
+        if skip is not None:
+            skip = int(skip)
 
         # Валидация $select
         select = query.get("select")
@@ -506,25 +652,42 @@ class ODataAgent(BaseAgent):
             select=select,
             orderby=orderby,
             top=top,
+            skip=skip,
             expand=expand,
             request_timeout=self._request_timeout,
         )
 
         # Fallback: если 0 записей и фильтр содержит Number + любую дату
         records, total = await self._fallback_date_filter(
-            records, total, entity, filter_expr, select, orderby, top, expand, auth,
+            records, total, entity, filter_expr, select, orderby, top, skip, expand, auth,
         )
 
         # Fallback 2: substringof (OData v3)
         records, total = await self._fallback_substringof(
-            records, total, entity, filter_expr, select, orderby, top, expand, auth,
+            records, total, entity, filter_expr, select, orderby, top, skip, expand, auth,
         )
 
         # ---- Шаг 2: AI форматирует ответ ----
-        answer = await self._ai_format_response(user_text, records, total, entity)
+        shown = len(records)
+        answer = await self._ai_format_response(
+            user_text, records, total, entity, shown=shown, skip=skip or 0,
+        )
 
+        # Сохранить контекст пагинации в историю (JSON в assistant-сообщении)
+        pagination_ctx = {
+            "entity": entity,
+            "filter": filter_expr,      # валидированный фильтр (после fallback)
+            "select": select,           # валидированный select (только существующие поля)
+            "orderby": orderby,         # валидированный orderby
+            "top": top,
+            "skip": skip or 0,
+            "total": total,
+            "shown": shown,
+            "expand": expand,
+            "explanation": query.get("explanation", ""),
+        }
         history.append({"role": "user", "content": user_text})
-        history.append({"role": "assistant", "content": json.dumps({"entity": entity, "filter": query.get("filter"), "select": query.get("select"), "explanation": query.get("explanation", "")}, ensure_ascii=False)})
+        history.append({"role": "assistant", "content": json.dumps(pagination_ctx, ensure_ascii=False)})
         return answer, history[-(self._history_max_turns * 2):]
 
     # -- query validation helpers --
@@ -564,6 +727,7 @@ class ODataAgent(BaseAgent):
         select: Optional[str],
         orderby: Optional[str],
         top: int,
+        skip: Optional[int],
         expand: Optional[str],
         auth: str,
     ) -> tuple[list[dict], int]:
@@ -587,6 +751,7 @@ class ODataAgent(BaseAgent):
             select=select,
             orderby=orderby,
             top=top,
+            skip=skip,
             expand=expand,
             request_timeout=self._request_timeout,
         )
@@ -601,6 +766,7 @@ class ODataAgent(BaseAgent):
         select: Optional[str],
         orderby: Optional[str],
         top: int,
+        skip: Optional[int],
         expand: Optional[str],
         auth: str,
     ) -> tuple[list[dict], int]:
@@ -627,6 +793,7 @@ class ODataAgent(BaseAgent):
             select=select,
             orderby=orderby,
             top=top,
+            skip=skip,
             expand=expand,
             request_timeout=self._request_timeout,
         )
@@ -640,6 +807,9 @@ class ODataAgent(BaseAgent):
         records: list[dict],
         total: int,
         entity: str,
+        shown: int = 0,
+        skip: int = 0,
+        prev_last_record: Optional[dict] = None,
     ) -> str:
         """Шаг 2: AI форматирует записи в HTML-ответ для Telegram."""
         resolved = resolve_references(records)
@@ -648,27 +818,143 @@ class ODataAgent(BaseAgent):
         if len(data_str) > self._max_data_length:
             data_str = data_str[:self._max_data_length] + "\n... (данные сокращены)"
 
+        # Информация о пагинации для AI
+        pagination_info = ""
+        if shown > 0 and total > shown:
+            pagination_info = f"\nПоказано записей: {shown} (пропущено: {skip})\nВсего записей в выборке: {total}\nЕсть ещё записи для пагинации."
+
+        # Последний элемент предыдущей страницы (для визуальной непрерывности)
+        prev_item_info = ""
+        if prev_last_record is not None:
+            prev_resolved = resolve_references([prev_last_record])
+            prev_json = json.dumps(prev_resolved[0], ensure_ascii=False, indent=2)
+            prev_item_info = (
+                f"\n\n⚠️ ПОСЛЕДНИЙ ЭЛЕМЕНТ С ПРЕДЫДУЩЕЙ СТРАНИЦЫ (показать как контекст-напоминание, "
+                f"без нумерации, курсивом, с разделителем '─── предыдущая страница ───'):\n{prev_json}"
+            )
+
         messages = [
             {"role": "system", "content": STEP2_SYSTEM},
-            {"role": "user", "content": f"Вопрос: {user_text}\n\nСущность: {entity}\nВсего записей: {total}\n\nДанные:\n{data_str}"},
+            {"role": "user", "content": (
+                f"Вопрос: {user_text}\n\nСущность: {entity}\n"
+                f"Всего записей: {total}{pagination_info}{prev_item_info}\n\n"
+                f"Данные:\n{data_str}"
+            )},
         ]
 
         if self._rate_limiter:
             await self._rate_limiter.wait()
 
-        try:
-            resp = await self._ai_client.chat.completions.create(  # type: ignore[union-attr]
-                model=self._model,
-                messages=messages,  # type: ignore[arg-type]
-                temperature=self._step2_temperature,
-            )
-        except Exception as exc:
-            raise self._wrap_ai_error(exc) from exc
+        metrics.increment("ai_requests_step2")
+        async with track_time("ai_step2"):
+            try:
+                resp = await self._ai_client.chat.completions.create(  # type: ignore[union-attr]
+                    model=self._model,
+                    messages=messages,  # type: ignore[arg-type]
+                    temperature=self._step2_temperature,
+                )
+            except Exception as exc:
+                raise self._wrap_ai_error(exc) from exc
+
+        self._track_ai_response(resp, "step2")
 
         content = resp.choices[0].message.content
         if not content:
             raise AIResponseError("AI вернул пустой ответ на шаге форматирования")
         return content
+
+    # -- pagination --
+
+    def save_pagination_state(self, chat_id: int, context: dict[str, Any]) -> None:
+        """Сохранить контекст последнего запроса для пагинации."""
+        self._pagination_states[chat_id] = context
+
+    def get_pagination_state(self, chat_id: int) -> Optional[dict[str, Any]]:
+        """Получить контекст пагинации для чата."""
+        return self._pagination_states.get(chat_id)
+
+    def clear_pagination_state(self, chat_id: int) -> None:
+        """Сбросить контекст пагинации (например, при /clear)."""
+        self._pagination_states.pop(chat_id, None)
+
+    async def execute_page(
+        self,
+        chat_id: int,
+        skip: int,
+    ) -> tuple[str, Optional[dict[str, Any]]]:
+        """Выполнить запрос с заданным skip (для inline-кнопок пагинации).
+
+        Не проходит через AI Step 1 — использует сохранённый контекст запроса.
+        Проходит через AI Step 2 для форматирования.
+
+        Args:
+            chat_id: идентификатор чата
+            skip: значение $skip
+
+        Returns:
+            Кортеж (answer_html, pagination_context или None).
+        """
+        ctx = self._pagination_states.get(chat_id)
+        if not ctx:
+            return "⚠️ Контекст запроса потерян. Повторите запрос.", None
+
+        entity = ctx["entity"]
+        filter_expr = ctx.get("filter")
+        select = ctx.get("select")
+        orderby = ctx.get("orderby")
+        top = ctx.get("top", self._default_top)
+        expand = ctx.get("expand")
+
+        auth = self._auth_header()
+
+        # При пагинации (skip > 0) захватить последний элемент предыдущей страницы
+        prev_last_record: Optional[dict] = None
+        effective_skip = skip
+        effective_top = top
+
+        if skip > 0:
+            effective_skip = skip - 1
+            effective_top = top + 1
+
+        try:
+            records, total = await execute_odata_query(
+                odata_url=self._cfg["odata_url"],
+                auth_header=auth,
+                entity=entity,
+                filter_expr=filter_expr,
+                select=select,
+                orderby=orderby,
+                top=effective_top,
+                skip=effective_skip,
+                expand=expand,
+                request_timeout=self._request_timeout,
+            )
+        except ODataError as e:
+            log.error("Pagination OData error: %s", e)
+            return f"❌ Ошибка запроса: {esc_html(str(e))}", None
+
+        # Отделить «хвост» предыдущей страницы от текущей
+        if skip > 0 and records:
+            prev_last_record = records[0]
+            records = records[1:]
+
+        shown = len(records)
+        user_text = f"Страница со смещением {skip}"
+        answer = await self._ai_format_response(
+            user_text, records, total, entity, shown=shown, skip=skip,
+            prev_last_record=prev_last_record,
+        )
+
+        # Обновить контекст пагинации
+        new_ctx = {
+            **ctx,
+            "skip": skip,
+            "total": total,
+            "shown": shown,
+        }
+        self._pagination_states[chat_id] = new_ctx
+
+        return answer, new_ctx
 
     # -- status --
 
@@ -679,4 +965,5 @@ class ODataAgent(BaseAgent):
             "entities_count": len(self._metadata.entities),
             "mcp_connected": self._mcp_manager.is_connected() if self._mcp_manager else False,
             "model": self._model,
+            "pagination_states": len(self._pagination_states),
         }

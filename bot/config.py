@@ -101,6 +101,13 @@ class MCPConfig(BaseModel):
     env: dict[str, str] = Field(default_factory=dict)
 
 
+class PricingSettings(BaseModel):
+    """Стоимость AI-запросов за 1M токенов (USD)."""
+
+    input_per_1m: float = Field(default=0.15, description="Цена входных токенов за 1M")
+    output_per_1m: float = Field(default=0.60, description="Цена выходных токенов за 1M")
+
+
 class HistorySettings(BaseModel):
     """Настройки управления историей диалогов."""
 
@@ -123,6 +130,7 @@ class AppSettings(BaseModel):
     odata_query: ODataQuerySettings = Field(default_factory=ODataQuerySettings)
     formatter: FormatterSettings = Field(default_factory=FormatterSettings)
     history: HistorySettings = Field(default_factory=HistorySettings)
+    ai_pricing: PricingSettings = Field(default_factory=PricingSettings)
 
     # Общие настройки
     cache_dir: str = Field(default=".cache", description="Директория для кэша")
@@ -299,6 +307,13 @@ def _build_settings(p: dict[str, Any]) -> AppSettings:
         persist_dir=hist_raw.get("persist_dir"),
     )
 
+    # --- AI Pricing ---
+    pricing_raw = p.get("ai_pricing", {})
+    ai_pricing = PricingSettings(
+        input_per_1m=pricing_raw.get("input_per_1m", 0.15),
+        output_per_1m=pricing_raw.get("output_per_1m", 0.60),
+    )
+
     # --- Agents config (raw, for backward compatibility with BaseAgent.initialize) ---
     agents_config = p.get("agents", {})
 
@@ -309,6 +324,7 @@ def _build_settings(p: dict[str, Any]) -> AppSettings:
         odata_query=odata_query,
         formatter=formatter,
         history=history,
+        ai_pricing=ai_pricing,
         cache_dir=p.get("cache_dir", ".cache"),
         log_level=p.get("log_level", "INFO"),
         log_file=p.get("log_file"),
