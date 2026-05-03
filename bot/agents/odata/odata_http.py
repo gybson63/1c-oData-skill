@@ -29,6 +29,7 @@ async def execute_odata_query(
     select: Optional[str] = None,
     orderby: Optional[str] = None,
     top: int = 20,
+    skip: Optional[int] = None,
     count: bool = False,
     expand: Optional[str] = None,
     request_timeout: int = 60,
@@ -47,6 +48,7 @@ async def execute_odata_query(
         select: OData ``$select`` (значение или ``$select=...``)
         orderby: OData ``$orderby`` (значение или ``$orderby=...``)
         top: OData ``$top``
+        skip: OData ``$skip`` — пропустить N первых записей (пагинация)
         count: если ``True`` — запрос ``/$count``
         expand: OData ``$expand``
         request_timeout: таймаут HTTP в секундах
@@ -86,7 +88,9 @@ async def execute_odata_query(
                 select=clean_select,
                 orderby=clean_orderby,
                 top=top,
+                skip=skip,
                 expand=clean_expand,
+                count=True,  # всегда запрашивать @odata.count для пагинации
             )
 
             records = data.get("value", [])

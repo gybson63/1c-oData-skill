@@ -125,7 +125,7 @@ class ODataClient:
             top: OData $top
             skip: OData $skip
             expand: OData $expand
-            count: добавить $count=true
+            count: добавить ``$inlinecount=allpages`` (OData v3, 1С)
 
         Returns:
             JSON-ответ как dict (обычно содержит ``value`` и опционально ``@odata.count``)
@@ -254,7 +254,7 @@ class ODataClient:
         if expand:
             params["$expand"] = expand
         if count:
-            params["$count"] = "true"
+            params["$inlinecount"] = "allpages"  # OData v3 (1C)
         if format_:
             params["$format"] = format_
         return params

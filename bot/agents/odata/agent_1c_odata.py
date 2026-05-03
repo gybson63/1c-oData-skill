@@ -85,6 +85,8 @@ class ODataAgent(BaseAgent):
         self._step2_temperature: float = _DEFAULT_STEP2_TEMPERATURE
         self._request_timeout: int = 60
         self._metadata_cache_seconds: int = 86400
+        # Контекст пагинации: chat_id → последний запрос
+        self._pagination_states: dict[int, dict[str, Any]] = {}
 
     # -- helpers --
 
@@ -472,6 +474,9 @@ class ODataAgent(BaseAgent):
     ) -> tuple[str, list[dict[str, str]]]:
         """Обработать запрос данных сущности."""
         top = min(int(query.get("top") or self._default_top), self._max_top)
+        skip = query.get("skip")
+        if skip is not None:
+            skip = int(skip)
 
         # Валидация $select
         select = query.get("select")
@@ -506,25 +511,42 @@ class ODataAgent(BaseAgent):
             select=select,
             orderby=orderby,
             top=top,
+            skip=skip,
             expand=expand,
             request_timeout=self._request_timeout,
         )
 
         # Fallback: если 0 записей и фильтр содержит Number + любую дату
         records, total = await self._fallback_date_filter(
-            records, total, entity, filter_expr, select, orderby, top, expand, auth,
+            records, total, entity, filter_expr, select, orderby, top, skip, expand, auth,
         )
 
         # Fallback 2: substringof (OData v3)
         records, total = await self._fallback_substringof(
-            records, total, entity, filter_expr, select, orderby, top, expand, auth,
+            records, total, entity, filter_expr, select, orderby, top, skip, expand, auth,
         )
 
         # ---- Шаг 2: AI форматирует ответ ----
-        answer = await self._ai_format_response(user_text, records, total, entity)
+        shown = len(records)
+        answer = await self._ai_format_response(
+            user_text, records, total, entity, shown=shown, skip=skip or 0,
+        )
 
+        # Сохранить контекст пагинации в историю (JSON в assistant-сообщении)
+        pagination_ctx = {
+            "entity": entity,
+            "filter": filter_expr,      # валидированный фильтр (после fallback)
+            "select": select,           # валидированный select (только существующие поля)
+            "orderby": orderby,         # валидированный orderby
+            "top": top,
+            "skip": skip or 0,
+            "total": total,
+            "shown": shown,
+            "expand": expand,
+            "explanation": query.get("explanation", ""),
+        }
         history.append({"role": "user", "content": user_text})
-        history.append({"role": "assistant", "content": json.dumps({"entity": entity, "filter": query.get("filter"), "select": query.get("select"), "explanation": query.get("explanation", "")}, ensure_ascii=False)})
+        history.append({"role": "assistant", "content": json.dumps(pagination_ctx, ensure_ascii=False)})
         return answer, history[-(self._history_max_turns * 2):]
 
     # -- query validation helpers --
@@ -564,6 +586,7 @@ class ODataAgent(BaseAgent):
         select: Optional[str],
         orderby: Optional[str],
         top: int,
+        skip: Optional[int],
         expand: Optional[str],
         auth: str,
     ) -> tuple[list[dict], int]:
@@ -587,6 +610,7 @@ class ODataAgent(BaseAgent):
             select=select,
             orderby=orderby,
             top=top,
+            skip=skip,
             expand=expand,
             request_timeout=self._request_timeout,
         )
@@ -601,6 +625,7 @@ class ODataAgent(BaseAgent):
         select: Optional[str],
         orderby: Optional[str],
         top: int,
+        skip: Optional[int],
         expand: Optional[str],
         auth: str,
     ) -> tuple[list[dict], int]:
@@ -627,6 +652,7 @@ class ODataAgent(BaseAgent):
             select=select,
             orderby=orderby,
             top=top,
+            skip=skip,
             expand=expand,
             request_timeout=self._request_timeout,
         )
@@ -640,6 +666,8 @@ class ODataAgent(BaseAgent):
         records: list[dict],
         total: int,
         entity: str,
+        shown: int = 0,
+        skip: int = 0,
     ) -> str:
         """Шаг 2: AI форматирует записи в HTML-ответ для Telegram."""
         resolved = resolve_references(records)
@@ -648,9 +676,14 @@ class ODataAgent(BaseAgent):
         if len(data_str) > self._max_data_length:
             data_str = data_str[:self._max_data_length] + "\n... (данные сокращены)"
 
+        # Информация о пагинации для AI
+        pagination_info = ""
+        if shown > 0 and total > shown:
+            pagination_info = f"\nПоказано записей: {shown} (пропущено: {skip})\nВсего записей в выборке: {total}\nЕсть ещё записи для пагинации."
+
         messages = [
             {"role": "system", "content": STEP2_SYSTEM},
-            {"role": "user", "content": f"Вопрос: {user_text}\n\nСущность: {entity}\nВсего записей: {total}\n\nДанные:\n{data_str}"},
+            {"role": "user", "content": f"Вопрос: {user_text}\n\nСущность: {entity}\nВсего записей: {total}{pagination_info}\n\nДанные:\n{data_str}"},
         ]
 
         if self._rate_limiter:
@@ -670,6 +703,84 @@ class ODataAgent(BaseAgent):
             raise AIResponseError("AI вернул пустой ответ на шаге форматирования")
         return content
 
+    # -- pagination --
+
+    def save_pagination_state(self, chat_id: int, context: dict[str, Any]) -> None:
+        """Сохранить контекст последнего запроса для пагинации."""
+        self._pagination_states[chat_id] = context
+
+    def get_pagination_state(self, chat_id: int) -> Optional[dict[str, Any]]:
+        """Получить контекст пагинации для чата."""
+        return self._pagination_states.get(chat_id)
+
+    def clear_pagination_state(self, chat_id: int) -> None:
+        """Сбросить контекст пагинации (например, при /clear)."""
+        self._pagination_states.pop(chat_id, None)
+
+    async def execute_page(
+        self,
+        chat_id: int,
+        skip: int,
+    ) -> tuple[str, Optional[dict[str, Any]]]:
+        """Выполнить запрос с заданным skip (для inline-кнопок пагинации).
+
+        Не проходит через AI Step 1 — использует сохранённый контекст запроса.
+        Проходит через AI Step 2 для форматирования.
+
+        Args:
+            chat_id: идентификатор чата
+            skip: значение $skip
+
+        Returns:
+            Кортеж (answer_html, pagination_context или None).
+        """
+        ctx = self._pagination_states.get(chat_id)
+        if not ctx:
+            return "⚠️ Контекст запроса потерян. Повторите запрос.", None
+
+        entity = ctx["entity"]
+        filter_expr = ctx.get("filter")
+        select = ctx.get("select")
+        orderby = ctx.get("orderby")
+        top = ctx.get("top", self._default_top)
+        expand = ctx.get("expand")
+
+        auth = self._auth_header()
+
+        try:
+            records, total = await execute_odata_query(
+                odata_url=self._cfg["odata_url"],
+                auth_header=auth,
+                entity=entity,
+                filter_expr=filter_expr,
+                select=select,
+                orderby=orderby,
+                top=top,
+                skip=skip,
+                expand=expand,
+                request_timeout=self._request_timeout,
+            )
+        except ODataError as e:
+            log.error("Pagination OData error: %s", e)
+            return f"❌ Ошибка запроса: {esc_html(str(e))}", None
+
+        shown = len(records)
+        user_text = f"Страница со смещением {skip}"
+        answer = await self._ai_format_response(
+            user_text, records, total, entity, shown=shown, skip=skip,
+        )
+
+        # Обновить контекст пагинации
+        new_ctx = {
+            **ctx,
+            "skip": skip,
+            "total": total,
+            "shown": shown,
+        }
+        self._pagination_states[chat_id] = new_ctx
+
+        return answer, new_ctx
+
     # -- status --
 
     def get_status(self) -> dict[str, Any]:
@@ -679,4 +790,5 @@ class ODataAgent(BaseAgent):
             "entities_count": len(self._metadata.entities),
             "mcp_connected": self._mcp_manager.is_connected() if self._mcp_manager else False,
             "model": self._model,
+            "pagination_states": len(self._pagination_states),
         }
