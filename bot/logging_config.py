@@ -396,6 +396,29 @@ def setup_logging(
     )
 
 
+def get_current_log_path() -> str | None:
+    """Вернуть путь к текущему лог-файлу сессии или None.
+
+    Ищет среди handlers root logger-а :class:`RotatingSessionFileHandler`
+    и возвращает его ``current_path``.
+    """
+    for handler in logging.getLogger().handlers:
+        if isinstance(handler, RotatingSessionFileHandler):
+            return handler.current_path
+    return None
+
+
+def get_current_log_stem() -> str | None:
+    """Вернуть stem текущего лог-файла (без ``.log``).
+
+    Пример: ``"0dc946d3_20260504_013007_009571"``
+    """
+    path = get_current_log_path()
+    if path:
+        return Path(path).stem
+    return None
+
+
 def get_structlog(name: str | None = None) -> structlog.stdlib.BoundLogger:
     """Получить structlog-логгер.
 

@@ -24,7 +24,7 @@ from openai import AsyncOpenAI, BadRequestError
 
 from bot.agents.base import BaseAgent
 from bot.config import get_settings
-from bot.metrics import metrics, track_time
+from bot.metrics import metrics, save_provider_response, track_time
 from bot.utils import RateLimiter, esc_html
 from bot_lib.exceptions import AIError, AIRateLimitError, AIResponseError, ODataError
 
@@ -313,18 +313,23 @@ class ODataAgent(BaseAgent):
         if usage:
             settings = get_settings()
             pricing = settings.ai_pricing
+            input_price, output_price = pricing.get_prices(self._model)
+            # Извлечь cost_rub из ответа провайдера (если доступен)
+            cost_rub = getattr(usage, "cost_rub", None)
             metrics.track_ai_usage(
                 model=self._model,
                 input_tokens=usage.prompt_tokens or 0,
                 output_tokens=usage.completion_tokens or 0,
-                input_price_per_1m=pricing.input_per_1m,
-                output_price_per_1m=pricing.output_per_1m,
+                input_price_per_1m=input_price,
+                output_price_per_1m=output_price,
+                cost_rub=cost_rub,
             )
             log.debug(
-                "AI usage [%s]: model=%s in=%d out=%d",
+                "AI usage [%s]: model=%s in=%d out=%d cost_rub=%s",
                 step, self._model,
                 usage.prompt_tokens or 0,
                 usage.completion_tokens or 0,
+                cost_rub,
             )
 
     async def _step1_call_ai(
@@ -352,6 +357,14 @@ class ODataAgent(BaseAgent):
                 raise self._wrap_ai_error(exc) from exc
 
         self._track_ai_response(resp, "step1")
+
+        # Сохранить ответ провайдера
+        save_provider_response(
+            step="step1",
+            model=self._model,
+            request_messages=messages,
+            response_data=resp.model_dump() if hasattr(resp, "model_dump") else str(resp),
+        )
         return resp
 
     # -- tool call handling --
@@ -1042,6 +1055,14 @@ class ODataAgent(BaseAgent):
                 raise self._wrap_ai_error(exc) from exc
 
         self._track_ai_response(resp, "step2")
+
+        # Сохранить ответ провайдера
+        save_provider_response(
+            step="step2",
+            model=self._model,
+            request_messages=messages,
+            response_data=resp.model_dump() if hasattr(resp, "model_dump") else str(resp),
+        )
 
         content = resp.choices[0].message.content
         if not content:

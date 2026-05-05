@@ -101,11 +101,33 @@ class MCPConfig(BaseModel):
     env: dict[str, str] = Field(default_factory=dict)
 
 
-class PricingSettings(BaseModel):
-    """Стоимость AI-запросов за 1M токенов (USD)."""
+class ModelPricing(BaseModel):
+    """Цены для конкретной модели AI за 1M токенов (USD)."""
 
-    input_per_1m: float = Field(default=0.15, description="Цена входных токенов за 1M")
-    output_per_1m: float = Field(default=0.60, description="Цена выходных токенов за 1M")
+    input_per_1m: float = Field(description="Цена входных токенов за 1M")
+    output_per_1m: float = Field(description="Цена выходных токенов за 1M")
+
+
+class PricingSettings(BaseModel):
+    """Стоимость AI-запросов за 1M токенов (USD).
+
+    Поддерживает per-model ценообразование через ``per_model``.
+    Если модель не найдена в ``per_model``, используются дефолтные цены.
+    """
+
+    input_per_1m: float = Field(default=0.15, description="Цена входных токенов за 1M (default)")
+    output_per_1m: float = Field(default=0.60, description="Цена выходных токенов за 1M (default)")
+    per_model: dict[str, ModelPricing] = Field(
+        default_factory=dict,
+        description="Цены по моделям: {model_name: {input_per_1m, output_per_1m}}",
+    )
+
+    def get_prices(self, model: str) -> tuple[float, float]:
+        """Вернуть (input_per_1m, output_per_1m) для модели или дефолт."""
+        if model in self.per_model:
+            mp = self.per_model[model]
+            return mp.input_per_1m, mp.output_per_1m
+        return self.input_per_1m, self.output_per_1m
 
 
 class HistorySettings(BaseModel):
@@ -309,9 +331,18 @@ def _build_settings(p: dict[str, Any]) -> AppSettings:
 
     # --- AI Pricing ---
     pricing_raw = p.get("ai_pricing", {})
+    per_model_raw = pricing_raw.get("per_model", {})
+    per_model = {
+        name: ModelPricing(
+            input_per_1m=mp.get("input_per_1m", 0.15),
+            output_per_1m=mp.get("output_per_1m", 0.60),
+        )
+        for name, mp in per_model_raw.items()
+    }
     ai_pricing = PricingSettings(
         input_per_1m=pricing_raw.get("input_per_1m", 0.15),
         output_per_1m=pricing_raw.get("output_per_1m", 0.60),
+        per_model=per_model,
     )
 
     # --- Agents config (raw, for backward compatibility with BaseAgent.initialize) ---

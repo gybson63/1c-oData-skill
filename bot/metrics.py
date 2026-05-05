@@ -96,17 +96,20 @@ class AIUsageEntry:
     input_tokens: int = 0
     output_tokens: int = 0
     total_cost_usd: float = 0.0
+    total_cost_rub: float = 0.0
 
     def record(
         self,
         input_tokens: int,
         output_tokens: int,
         cost_usd: float,
+        cost_rub: float = 0.0,
     ) -> None:
         self.requests += 1
         self.input_tokens += input_tokens
         self.output_tokens += output_tokens
         self.total_cost_usd += cost_usd
+        self.total_cost_rub += cost_rub
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +164,7 @@ class MetricsRegistry:
         output_tokens: int,
         input_price_per_1m: float = 0.15,
         output_price_per_1m: float = 0.60,
+        cost_rub: float | None = None,
     ) -> None:
         """Записать использование AI (токены + стоимость).
 
@@ -170,10 +174,12 @@ class MetricsRegistry:
             output_tokens: количество выходных токенов.
             input_price_per_1m: цена за 1M входных токенов (USD).
             output_price_per_1m: цена за 1M выходных токенов (USD).
+            cost_rub: стоимость запроса в рублях из ответа API (если доступна).
         """
         cost = (input_tokens * input_price_per_1m + output_tokens * output_price_per_1m) / 1_000_000
+        cost_rub_val = cost_rub if cost_rub is not None else 0.0
 
-        self._ai_usage[model].record(input_tokens, output_tokens, cost)
+        self._ai_usage[model].record(input_tokens, output_tokens, cost, cost_rub=cost_rub_val)
 
         # Персистентная запись в JSONL (если CostLogger инициализирован)
         if _cost_logger is not None:
@@ -182,16 +188,18 @@ class MetricsRegistry:
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 cost_usd=cost,
+                cost_rub=cost_rub_val,
                 input_price_per_1m=input_price_per_1m,
                 output_price_per_1m=output_price_per_1m,
             )
 
         log.info(
-            "ai_usage model=%s input_tokens=%d output_tokens=%d cost=$%.6f",
+            "ai_usage model=%s input_tokens=%d output_tokens=%d cost=$%.6f cost_rub=%.6f",
             model,
             input_tokens,
             output_tokens,
             cost,
+            cost_rub_val,
         )
 
     def get_ai_usage(self, model: str | None = None) -> dict[str, AIUsageEntry] | AIUsageEntry | None:
@@ -234,6 +242,7 @@ class MetricsRegistry:
         total_input = 0
         total_output = 0
         total_cost = 0.0
+        total_cost_rub = 0.0
         total_requests = 0
         for model, entry in sorted(self._ai_usage.items()):
             ai_report[model] = {
@@ -241,10 +250,12 @@ class MetricsRegistry:
                 "input_tokens": entry.input_tokens,
                 "output_tokens": entry.output_tokens,
                 "cost_usd": round(entry.total_cost_usd, 6),
+                "cost_rub": round(entry.total_cost_rub, 6),
             }
             total_input += entry.input_tokens
             total_output += entry.output_tokens
             total_cost += entry.total_cost_usd
+            total_cost_rub += entry.total_cost_rub
             total_requests += entry.requests
 
         return {
@@ -257,6 +268,7 @@ class MetricsRegistry:
                 "input_tokens": total_input,
                 "output_tokens": total_output,
                 "cost_usd": round(total_cost, 6),
+                "cost_rub": round(total_cost_rub, 6),
             },
         }
 
@@ -298,15 +310,17 @@ class MetricsRegistry:
             lines.append("")
             lines.append("🤖 AI использование:")
             for model, usage in ai.items():
+                rub_str = f", ₽{usage['cost_rub']:.4f}" if usage.get("cost_rub") else ""
                 lines.append(
                     f"  • {model}: {usage['requests']} запросов, "
                     f"IN={usage['input_tokens']}, OUT={usage['output_tokens']}, "
-                    f"${usage['cost_usd']:.4f}"
+                    f"${usage['cost_usd']:.4f}{rub_str}"
                 )
+            rub_total_str = f", ₽{ai_total['cost_rub']:.4f}" if ai_total.get("cost_rub") else ""
             lines.append(
                 f"  ─ Итого: {ai_total['requests']} запросов, "
                 f"IN={ai_total['input_tokens']}, OUT={ai_total['output_tokens']}, "
-                f"${ai_total['cost_usd']:.4f}"
+                f"${ai_total['cost_usd']:.4f}{rub_total_str}"
             )
 
         return "\n".join(lines)
@@ -430,6 +444,7 @@ class CostLogger:
         input_tokens: int,
         output_tokens: int,
         cost_usd: float,
+        cost_rub: float = 0.0,
         input_price_per_1m: float = 0.0,
         output_price_per_1m: float = 0.0,
         chat_id: int | None = None,
@@ -443,6 +458,7 @@ class CostLogger:
             input_tokens: количество входных токенов.
             output_tokens: количество выходных токенов.
             cost_usd: стоимость в USD.
+            cost_rub: стоимость в рублях (из ответа API провайдера).
             input_price_per_1m: цена за 1M входных (для аналитики).
             output_price_per_1m: цена за 1M выходных (для аналитики).
             chat_id: ID чата (для аналитики по чатам).
@@ -457,6 +473,7 @@ class CostLogger:
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
             "cost_usd": round(cost_usd, 8),
+            "cost_rub": round(cost_rub, 8),
             "input_price_per_1m": input_price_per_1m,
             "output_price_per_1m": output_price_per_1m,
         }
@@ -770,3 +787,102 @@ def setup_cost_logging(cost_dir: str = "logs/costs") -> None:
 def get_cost_logger() -> CostLogger | None:
     """Получить текущий CostLogger (или None, если не инициализирован)."""
     return _cost_logger
+
+
+# ---------------------------------------------------------------------------
+# ProviderResponseSaver — сохранение ответов провайдера AI
+# ---------------------------------------------------------------------------
+
+_provider_response_dir: str | None = None
+
+
+def setup_provider_response_logging(log_dir: str = "logs") -> None:
+    """Инициализировать сохранение ответов провайдера.
+
+    Ответы сохраняются в подкаталогах ``<log_dir>/<session_id>/``,
+    где ``<session_id>`` — уникальный идентификатор сессии (постоянный весь запуск).
+
+    Args:
+        log_dir: корневая папка логов.
+    """
+    global _provider_response_dir
+    _provider_response_dir = log_dir
+    log.info("provider_response_logging_initialized log_dir=%s", log_dir)
+
+
+def save_provider_response(
+    *,
+    step: str,
+    model: str,
+    request_messages: list[dict[str, Any]],
+    response_data: Any,
+    log_stem: str | None = None,
+) -> str | None:
+    """Сохранить ответ провайдера AI в JSON-файл.
+
+    Файлы сохраняются в ``logs/<session_id>/NNN_<step>.json``,
+    где ``<session_id>`` — идентификатор сессии (не меняется при ротации логов),
+    ``NNN`` — порядковый номер запроса в сессии.
+
+    Args:
+        step: этап (``"step1"``, ``"step2"``, ``"formatter"`` и т.д.).
+        model: модель AI.
+        request_messages: список сообщений запроса.
+        response_data: данные ответа (сериализуемый dict).
+        log_stem: явное имя папки (если None — используется ``session_id``).
+
+    Returns:
+        Путь к сохранённому файлу или None при ошибке.
+    """
+    from bot.logging_config import get_session_id
+
+    if _provider_response_dir is None:
+        return None
+
+    stem = log_stem or get_session_id()
+    if not stem:
+        log.debug("save_provider_response skipped: no session_id")
+        return None
+
+    # Каталог для ответов этой сессии
+    response_dir = Path(_provider_response_dir) / stem
+    response_dir.mkdir(parents=True, exist_ok=True)
+
+    # Определить следующий порядковый номер
+    existing = list(response_dir.glob("*.json"))
+    next_num = len(existing) + 1
+
+    # Имя файла: 001_step1.json, 002_step2.json, …
+    filename = f"{next_num:03d}_{step}.json"
+    filepath = response_dir / filename
+
+    # Собрать полную запись
+    record = {
+        "ts": datetime.now(tz=UTC).isoformat(),
+        "step": step,
+        "model": model,
+        "request": {
+            "messages_count": len(request_messages),
+            "messages": request_messages,
+        },
+        "response": response_data,
+    }
+
+    try:
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(record, f, ensure_ascii=False, indent=2, default=str)
+        log.info(
+            "provider_response_saved file=%s step=%s model=%s",
+            filepath,
+            step,
+            model,
+        )
+        return str(filepath)
+    except (OSError, TypeError, ValueError) as exc:
+        log.warning(
+            "Failed to save provider response to %s: %s [%s]",
+            filepath,
+            exc,
+            type(exc).__name__,
+        )
+        return None

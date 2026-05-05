@@ -39,7 +39,7 @@ from bot.agents.odata import ODataAgent  # noqa: E402
 from bot.config import build_global_config, get_settings, load_settings  # noqa: E402
 from bot.history import HistoryManager  # noqa: E402
 from bot.logging_config import setup_logging  # noqa: E402
-from bot.metrics import metrics as app_metrics  # noqa: E402
+from bot.metrics import metrics as app_metrics, setup_cost_logging, setup_provider_response_logging  # noqa: E402
 from bot.utils import sanitize_telegram_html  # noqa: E402
 from bot_lib.exceptions import AIError, ODataError, ODataSkillError  # noqa: E402
 
@@ -533,6 +533,12 @@ def main() -> None:
     log_level = args.log_level or settings.log_level
     log_file = args.log_file or settings.log_file
     setup_logging(level=log_level, log_file=log_file)
+
+    # Инициализировать логирование AI-затрат в logs/costs/
+    setup_cost_logging(cost_dir="logs/costs")
+
+    # Инициализировать сохранение ответов провайдера в logs/<session_id>/
+    setup_provider_response_logging(log_dir="logs")
 
     tg = settings.telegram
 
