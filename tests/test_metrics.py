@@ -117,14 +117,29 @@ class TestAIUsage:
         assert entry.output_tokens == 500
         # cost = (1000 * 0.15 + 500 * 0.60) / 1_000_000 = 0.00045
         assert entry.total_cost_usd == pytest.approx(0.00045, abs=0.000001)
+        assert entry.total_cost_rub == 0.0  # cost_rub не передан
+
+    def test_track_ai_usage_with_cost_rub(self, registry):
+        registry.track_ai_usage(
+            model="gpt-4o-mini",
+            input_tokens=1000,
+            output_tokens=500,
+            input_price_per_1m=0.15,
+            output_price_per_1m=0.60,
+            cost_rub=0.13122624,
+        )
+        entry = registry.get_ai_usage("gpt-4o-mini")
+        assert entry is not None
+        assert entry.total_cost_rub == pytest.approx(0.13122624, abs=0.000001)
 
     def test_track_ai_usage_accumulates(self, registry):
         registry.track_ai_usage("gpt-4o", 100, 50, 0.15, 0.60)
-        registry.track_ai_usage("gpt-4o", 200, 100, 0.15, 0.60)
+        registry.track_ai_usage("gpt-4o", 200, 100, 0.15, 0.60, cost_rub=0.05)
         entry = registry.get_ai_usage("gpt-4o")
         assert entry.requests == 2
         assert entry.input_tokens == 300
         assert entry.output_tokens == 150
+        assert entry.total_cost_rub == pytest.approx(0.05, abs=0.000001)
 
     def test_track_ai_usage_multiple_models(self, registry):
         registry.track_ai_usage("model-a", 100, 50, 0.15, 0.60)
@@ -161,14 +176,23 @@ class TestReport:
         assert "gpt-4o-mini" in report["ai_usage"]
 
     def test_report_ai_total(self, registry):
-        registry.track_ai_usage("model-a", 100, 50, 0.15, 0.60)
-        registry.track_ai_usage("model-b", 200, 100, 0.15, 0.60)
+        registry.track_ai_usage("model-a", 100, 50, 0.15, 0.60, cost_rub=0.10)
+        registry.track_ai_usage("model-b", 200, 100, 0.15, 0.60, cost_rub=0.20)
 
         report = registry.report()
         total = report["ai_total"]
         assert total["requests"] == 2
         assert total["input_tokens"] == 300
         assert total["output_tokens"] == 150
+        assert total["cost_rub"] == pytest.approx(0.30, abs=0.001)
+
+    def test_report_includes_cost_rub_per_model(self, registry):
+        registry.track_ai_usage("gpt-4o-mini", 100, 50, 0.15, 0.60, cost_rub=0.13122624)
+
+        report = registry.report()
+        usage = report["ai_usage"]["gpt-4o-mini"]
+        assert "cost_rub" in usage
+        assert usage["cost_rub"] == pytest.approx(0.131226, abs=0.0001)
 
     def test_format_report(self, registry):
         registry.increment("odata_requests")
@@ -180,6 +204,12 @@ class TestReport:
         assert "odata_requests" in text
         assert "odata_get" in text
         assert "gpt-4o-mini" in text
+
+    def test_format_report_with_cost_rub(self, registry):
+        registry.track_ai_usage("gpt-4o-mini", 100, 50, 0.15, 0.60, cost_rub=0.1312)
+
+        text = registry.format_report()
+        assert "₽0.1312" in text
 
 
 # ---------------------------------------------------------------------------
@@ -274,6 +304,24 @@ class TestCostLogger:
         assert entry["input_tokens"] == 100
         assert entry["output_tokens"] == 50
         assert entry["cost_usd"] == pytest.approx(0.000045, abs=1e-8)
+        assert entry["cost_rub"] == 0.0  # cost_rub по умолчанию
+
+    def test_log_with_cost_rub(self, tmp_path):
+        cost_dir = tmp_path / "costs"
+        logger = CostLogger(str(cost_dir))
+
+        logger.log(
+            model="gpt-4o-mini",
+            input_tokens=100,
+            output_tokens=50,
+            cost_usd=0.000045,
+            cost_rub=0.13122624,
+            ts=datetime(2026, 5, 4, 12, 0, 0, tzinfo=UTC),
+        )
+
+        files = list(cost_dir.glob("costs_*.jsonl"))
+        entry = json.loads(files[0].read_text(encoding="utf-8").strip())
+        assert entry["cost_rub"] == pytest.approx(0.13122624, abs=1e-6)
 
     def test_log_with_chat_id(self, tmp_path):
         cost_dir = tmp_path / "costs"

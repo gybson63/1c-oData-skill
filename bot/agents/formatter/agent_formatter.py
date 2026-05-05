@@ -15,7 +15,7 @@ from openai import AsyncOpenAI
 
 from bot.agents.base import BaseAgent
 from bot.config import get_settings
-from bot.metrics import metrics, track_time
+from bot.metrics import metrics, save_provider_response, track_time
 from bot.utils import RateLimiter
 from bot_lib.exceptions import AIRateLimitError, AIResponseError
 
@@ -139,19 +139,32 @@ class FormatterAgent(BaseAgent):
         if usage:
             settings = get_settings()
             pricing = settings.ai_pricing
+            input_price, output_price = pricing.get_prices(self._model)
+            # Извлечь cost_rub из ответа провайдера (если доступен)
+            cost_rub = getattr(usage, "cost_rub", None)
             metrics.track_ai_usage(
                 model=self._model,
                 input_tokens=usage.prompt_tokens or 0,
                 output_tokens=usage.completion_tokens or 0,
-                input_price_per_1m=pricing.input_per_1m,
-                output_price_per_1m=pricing.output_per_1m,
+                input_price_per_1m=input_price,
+                output_price_per_1m=output_price,
+                cost_rub=cost_rub,
             )
             log.debug(
-                "AI usage [formatter]: model=%s in=%d out=%d",
+                "AI usage [formatter]: model=%s in=%d out=%d cost_rub=%s",
                 self._model,
                 usage.prompt_tokens or 0,
                 usage.completion_tokens or 0,
+                cost_rub,
             )
+
+        # Сохранить ответ провайдера
+        save_provider_response(
+            step="formatter",
+            model=self._model,
+            request_messages=messages,
+            response_data=resp.model_dump() if hasattr(resp, "model_dump") else str(resp),
+        )
 
         try:
             formatted = resp.choices[0].message.content or raw_answer
