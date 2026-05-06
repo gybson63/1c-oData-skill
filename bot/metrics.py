@@ -352,33 +352,63 @@ def reset_metrics() -> None:
 
 @dataclass
 class SessionTokens:
-    """Счётчик токенов для одной сессии (чата)."""
+    """Счётчик токенов и стоимости для одной сессии (чата)."""
 
     input_tokens: int = 0
     output_tokens: int = 0
     requests: int = 0
+    cost_usd: float = 0.0
+    cost_rub: float = 0.0
 
-    def record(self, input_tokens: int, output_tokens: int) -> None:
+    def record(
+        self,
+        input_tokens: int,
+        output_tokens: int,
+        cost_usd: float = 0.0,
+        cost_rub: float = 0.0,
+    ) -> None:
         self.input_tokens += input_tokens
         self.output_tokens += output_tokens
         self.requests += 1
+        self.cost_usd += cost_usd
+        self.cost_rub += cost_rub
 
     @property
     def total_tokens(self) -> int:
         return self.input_tokens + self.output_tokens
 
+    @staticmethod
+    def _fmt_cost(cost: float) -> str:
+        """Красивое форматирование стоимости."""
+        if cost < 0.01:
+            return f"${cost:.6f}"
+        if cost < 1.0:
+            return f"${cost:.4f}"
+        return f"${cost:.2f}"
+
     def format_compact(self) -> str:
-        """Компактная строка: 📥1234 📤567."""
-        return f"📥{self.input_tokens:,} 📤{self.output_tokens:,}"
+        """Компактная строка: 📥1234 📤567 💰₽0.05."""
+        parts = f"📥{self.input_tokens:,} 📤{self.output_tokens:,}"
+        if self.cost_rub > 0:
+            parts += f" 💰₽{self.cost_rub:.2f}"
+        elif self.cost_usd > 0:
+            parts += f" 💰{self._fmt_cost(self.cost_usd)}"
+        return parts
 
     def format_detail(self) -> str:
         """Детальная строка для /tokens."""
-        return (
-            f"  • Запросов: {self.requests}\n"
-            f"  • Входящих (input): {self.input_tokens:,}\n"
-            f"  • Исходящих (output): {self.output_tokens:,}\n"
-            f"  • Всего: {self.total_tokens:,}"
-        )
+        lines = [
+            f"  • Запросов: {self.requests}",
+            f"  • Входящих (input): {self.input_tokens:,}",
+            f"  • Исходящих (output): {self.output_tokens:,}",
+            f"  • Всего: {self.total_tokens:,}",
+        ]
+        if self.cost_rub > 0 or self.cost_usd > 0:
+            cost_parts = self._fmt_cost(self.cost_usd)
+            if self.cost_rub > 0:
+                cost_parts += f" (₽{self.cost_rub:.2f})"
+            lines.append(f"  • Стоимость: {cost_parts}")
+        return "\n".join(lines)
 
 
 class SessionTokenTracker:
@@ -404,9 +434,18 @@ class SessionTokenTracker:
     def __init__(self) -> None:
         self._sessions: dict[int, SessionTokens] = {}
 
-    def record(self, chat_id: int, input_tokens: int, output_tokens: int) -> None:
-        """Записать токены для сессии."""
-        self._sessions.setdefault(chat_id, SessionTokens()).record(input_tokens, output_tokens)
+    def record(
+        self,
+        chat_id: int,
+        input_tokens: int,
+        output_tokens: int,
+        cost_usd: float = 0.0,
+        cost_rub: float = 0.0,
+    ) -> None:
+        """Записать токены и стоимость для сессии."""
+        self._sessions.setdefault(chat_id, SessionTokens()).record(
+            input_tokens, output_tokens, cost_usd=cost_usd, cost_rub=cost_rub,
+        )
 
     def get(self, chat_id: int) -> SessionTokens:
         """Получить счётчик сессии (или пустой)."""

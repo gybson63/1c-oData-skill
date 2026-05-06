@@ -340,10 +340,17 @@ class ODataAgent(BaseAgent):
                 output_price_per_1m=output_price,
                 cost_rub=cost_rub,
             )
-            # Записать токены в per-session трекер (если chat_id задан)
+            # Записать токены и стоимость в per-session трекер (если chat_id задан)
             chat_id = _current_chat_id.get()
             if chat_id is not None:
-                session_tokens.record(chat_id, input_tokens=in_tok, output_tokens=out_tok)
+                cost_usd = (in_tok * input_price + out_tok * output_price) / 1_000_000
+                session_tokens.record(
+                    chat_id,
+                    input_tokens=in_tok,
+                    output_tokens=out_tok,
+                    cost_usd=cost_usd,
+                    cost_rub=cost_rub or 0.0,
+                )
             log.debug(
                 "AI usage [%s]: model=%s in=%d out=%d cost_rub=%s chat_id=%s",
                 step, self._model, in_tok, out_tok, cost_rub, chat_id,
