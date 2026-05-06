@@ -39,7 +39,14 @@ from bot.agents.odata import ODataAgent  # noqa: E402
 from bot.config import build_global_config, get_settings, load_settings  # noqa: E402
 from bot.history import HistoryManager  # noqa: E402
 from bot.logging_config import setup_logging  # noqa: E402
-from bot.metrics import metrics as app_metrics, session_tokens, setup_cost_logging, setup_provider_response_logging  # noqa: E402
+from bot.metrics import (  # noqa: E402
+    metrics as app_metrics,
+)
+from bot.metrics import (  # noqa: E402
+    session_tokens,
+    setup_cost_logging,
+    setup_provider_response_logging,
+)
 from bot.utils import sanitize_telegram_html  # noqa: E402
 from bot_lib.exceptions import AIError, ODataError, ODataSkillError  # noqa: E402
 
