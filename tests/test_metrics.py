@@ -12,9 +12,12 @@ from bot.metrics import (
     CostBucket,
     CostLogger,
     MetricsRegistry,
+    SessionTokenTracker,
+    SessionTokens,
     get_cost_logger,
     metrics,
     reset_metrics,
+    session_tokens,
     setup_cost_logging,
     track_sync,
     track_time,
@@ -556,3 +559,179 @@ class TestSetupCostLogging:
             assert entry["input_tokens"] == 100
         finally:
             mod._cost_logger = old_logger
+
+
+# ---------------------------------------------------------------------------
+# SessionTokens dataclass tests
+# ---------------------------------------------------------------------------
+
+
+class TestSessionTokens:
+    def test_default_values(self):
+        st = SessionTokens()
+        assert st.input_tokens == 0
+        assert st.output_tokens == 0
+        assert st.requests == 0
+        assert st.cost_usd == 0.0
+        assert st.cost_rub == 0.0
+
+    def test_total_tokens(self):
+        st = SessionTokens(input_tokens=1000, output_tokens=500)
+        assert st.total_tokens == 1500
+
+    def test_record_with_cost(self):
+        st = SessionTokens()
+        st.record(input_tokens=100, output_tokens=50, cost_usd=0.000045, cost_rub=0.005)
+        assert st.input_tokens == 100
+        assert st.output_tokens == 50
+        assert st.requests == 1
+        assert st.cost_usd == pytest.approx(0.000045, abs=1e-8)
+        assert st.cost_rub == pytest.approx(0.005, abs=1e-6)
+
+    def test_record_accumulates_cost(self):
+        st = SessionTokens()
+        st.record(input_tokens=100, output_tokens=50, cost_usd=0.01, cost_rub=1.0)
+        st.record(input_tokens=200, output_tokens=100, cost_usd=0.02, cost_rub=2.0)
+        assert st.cost_usd == pytest.approx(0.03, abs=1e-6)
+        assert st.cost_rub == pytest.approx(3.0, abs=1e-6)
+
+    def test_format_compact_empty(self):
+        st = SessionTokens()
+        assert st.format_compact() == "📥0 📤0"
+
+    def test_format_compact_with_tokens(self):
+        st = SessionTokens(input_tokens=1000, output_tokens=500, requests=3)
+        text = st.format_compact()
+        assert "📥1,000" in text
+        assert "📤500" in text
+
+    def test_format_compact_with_cost_rub(self):
+        st = SessionTokens(input_tokens=1000, output_tokens=500, cost_rub=1.23)
+        text = st.format_compact()
+        assert "💰₽1.23" in text
+
+    def test_format_compact_with_cost_usd_only(self):
+        st = SessionTokens(input_tokens=1000, output_tokens=500, cost_usd=0.05)
+        text = st.format_compact()
+        assert "💰$0.0500" in text
+
+    def test_format_detail(self):
+        st = SessionTokens(input_tokens=5000, output_tokens=2000, requests=10)
+        text = st.format_detail()
+        assert "Запросов: 10" in text
+        assert "5,000" in text
+        assert "2,000" in text
+        assert "7,000" in text  # total
+
+    def test_format_detail_empty(self):
+        st = SessionTokens()
+        text = st.format_detail()
+        assert "Запросов: 0" in text
+
+    def test_format_detail_with_cost(self):
+        st = SessionTokens(input_tokens=1000, output_tokens=500, cost_usd=0.05, cost_rub=4.50)
+        text = st.format_detail()
+        assert "Стоимость:" in text
+        assert "$0.0500" in text
+        assert "₽4.50" in text
+
+    def test_fmt_cost_small(self):
+        assert SessionTokens._fmt_cost(0.000045) == "$0.000045"
+
+    def test_fmt_cost_medium(self):
+        assert SessionTokens._fmt_cost(0.05) == "$0.0500"
+
+    def test_fmt_cost_large(self):
+        assert SessionTokens._fmt_cost(5.0) == "$5.00"
+
+
+# ---------------------------------------------------------------------------
+# SessionTokenTracker tests
+# ---------------------------------------------------------------------------
+
+
+class TestSessionTokenTracker:
+    @pytest.fixture
+    def tracker(self):
+        return SessionTokenTracker()
+
+    def test_record_single(self, tracker):
+        tracker.record(chat_id=123, input_tokens=100, output_tokens=50)
+        st = tracker.get(123)
+        assert st.input_tokens == 100
+        assert st.output_tokens == 50
+        assert st.requests == 1
+
+    def test_record_accumulates(self, tracker):
+        tracker.record(chat_id=123, input_tokens=100, output_tokens=50)
+        tracker.record(chat_id=123, input_tokens=200, output_tokens=100)
+        st = tracker.get(123)
+        assert st.input_tokens == 300
+        assert st.output_tokens == 150
+        assert st.requests == 2
+
+    def test_multiple_sessions(self, tracker):
+        tracker.record(chat_id=100, input_tokens=100, output_tokens=50)
+        tracker.record(chat_id=200, input_tokens=200, output_tokens=100)
+        assert tracker.get(100).input_tokens == 100
+        assert tracker.get(200).input_tokens == 200
+
+    def test_get_nonexistent_session(self, tracker):
+        st = tracker.get(999)
+        assert st.requests == 0
+
+    def test_clear_session(self, tracker):
+        tracker.record(chat_id=123, input_tokens=100, output_tokens=50)
+        tracker.clear(123)
+        st = tracker.get(123)
+        assert st.requests == 0
+        assert st.input_tokens == 0
+
+    def test_clear_nonexistent_session(self, tracker):
+        tracker.clear(999)  # не должно падать
+
+    def test_session_count(self, tracker):
+        assert tracker.session_count == 0
+        tracker.record(chat_id=100, input_tokens=100, output_tokens=50)
+        assert tracker.session_count == 1
+        tracker.record(chat_id=200, input_tokens=200, output_tokens=100)
+        assert tracker.session_count == 2
+
+    def test_get_compact(self, tracker):
+        tracker.record(chat_id=123, input_tokens=1000, output_tokens=500)
+        text = tracker.get_compact(123)
+        assert "📥1,000" in text
+        assert "📤500" in text
+
+    def test_format_session_report_empty(self, tracker):
+        text = tracker.format_session_report(123)
+        assert "Токены текущей сессии" in text
+        assert "Запросов: 0" in text
+
+    def test_format_session_report_with_data(self, tracker):
+        tracker.record(chat_id=123, input_tokens=1000, output_tokens=500)
+        text = tracker.format_session_report(123)
+        assert "Запросов: 1" in text
+        assert "1,000" in text
+        assert "500" in text
+
+    def test_record_with_cost(self, tracker):
+        tracker.record(chat_id=123, input_tokens=100, output_tokens=50,
+                        cost_usd=0.000045, cost_rub=0.005)
+        st = tracker.get(123)
+        assert st.cost_usd == pytest.approx(0.000045, abs=1e-8)
+        assert st.cost_rub == pytest.approx(0.005, abs=1e-6)
+
+    def test_get_compact_with_cost_rub(self, tracker):
+        tracker.record(chat_id=123, input_tokens=1000, output_tokens=500,
+                        cost_rub=2.50)
+        text = tracker.get_compact(123)
+        assert "💰₽2.50" in text
+
+    def test_format_session_report_with_cost(self, tracker):
+        tracker.record(chat_id=123, input_tokens=1000, output_tokens=500,
+                        cost_usd=0.05, cost_rub=4.50)
+        text = tracker.format_session_report(123)
+        assert "Стоимость:" in text
+        assert "$0.0500" in text
+        assert "₽4.50" in text

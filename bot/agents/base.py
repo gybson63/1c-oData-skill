@@ -59,12 +59,15 @@ class BaseAgent(abc.ABC):
         self,
         user_text: str,
         history: list[dict[str, str]],
+        *,
+        chat_id: int | None = None,
     ) -> tuple[str, list[dict[str, str]]]:
         """Обработать сообщение пользователя.
 
         Args:
             user_text: текст сообщения от пользователя
             history: история диалога (список {role, content})
+            chat_id: ID чата для трекинга токенов по сессии
 
         Returns:
             Кортеж (answer, updated_history):
