@@ -39,7 +39,7 @@ from bot.agents.odata import ODataAgent  # noqa: E402
 from bot.config import build_global_config, get_settings, load_settings  # noqa: E402
 from bot.history import HistoryManager  # noqa: E402
 from bot.logging_config import setup_logging  # noqa: E402
-from bot.metrics import metrics as app_metrics, setup_cost_logging, setup_provider_response_logging  # noqa: E402
+from bot.metrics import metrics as app_metrics, session_tokens, setup_cost_logging, setup_provider_response_logging  # noqa: E402
 from bot.utils import sanitize_telegram_html  # noqa: E402
 from bot_lib.exceptions import AIError, ODataError, ODataSkillError  # noqa: E402
 
@@ -209,6 +209,7 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/refresh — обновить метаданные 1С",
         "/status — статус агентов",
         "/metrics — метрики производительности и AI-usage",
+        "/tokens — расход токенов текущей сессии",
         "/clear — очистить историю диалога",
         "/history — статистика истории",
     ]
@@ -248,6 +249,9 @@ async def handle_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if agent and isinstance(agent, ODataAgent):
         agent.clear_pagination_state(chat_id)
 
+    # Сбросить счётчик токенов сессии
+    session_tokens.clear(chat_id)
+
     await update.message.reply_text("🗑 История диалога очищена.")
 
 
@@ -279,6 +283,13 @@ async def handle_history_stats(update: Update, context: ContextTypes.DEFAULT_TYP
 async def handle_metrics(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Команда /metrics — показать метрики производительности и AI-usage."""
     report = app_metrics.format_report()
+    await update.message.reply_text(report, parse_mode="HTML")
+
+
+async def handle_tokens(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Команда /tokens — показать расход токенов текущей сессии."""
+    chat_id = update.effective_chat.id
+    report = session_tokens.format_session_report(chat_id)
     await update.message.reply_text(report, parse_mode="HTML")
 
 
@@ -325,7 +336,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # Обработка основным агентом
     try:
-        answer, updated_history = await agent.process_message(user_text, history)
+        answer, updated_history = await agent.process_message(user_text, history, chat_id=chat_id)
     except ODataError as e:
         log.error("OData error in chat %s: %s", chat_id, e)
         await update.message.reply_text(f"⚠️ Ошибка OData: {e}")
@@ -349,9 +360,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # Форматирование через FormatterAgent (если доступен)
     if _formatter and _formatter.is_initialized:
         try:
-            answer = await _formatter.format_response(answer, user_question=user_text)
+            answer = await _formatter.format_response(answer, user_question=user_text, chat_id=chat_id)
         except Exception as e:
             log.warning("FormatterAgent: ошибка форматирования (%s), отправляю как есть", e)
+
+    # Подпись с токенами сессии
+    st = session_tokens.get(chat_id)
+    if st.requests > 0:
+        answer += f"\n\n<i>{st.format_compact()}</i>"
 
     # Truncate (Telegram limit: 4096 chars)
     settings = get_settings()
@@ -442,12 +458,17 @@ async def handle_pagination_callback(update: Update, context: ContextTypes.DEFAU
     # Форматирование через FormatterAgent
     if _formatter and _formatter.is_initialized:
         try:
-            answer = await _formatter.format_response(answer, user_question="продолжение")
+            answer = await _formatter.format_response(answer, user_question="продолжение", chat_id=chat_id)
         except Exception as e:
             log.warning("FormatterAgent: ошибка при пагинации (%s)", e)
 
     # Проверить, есть ли ещё страницы
     reply_markup = _build_pagination_keyboard(pagination_ctx)
+
+    # Подпись с токенами
+    st = session_tokens.get(chat_id)
+    if st.requests > 0:
+        answer += f"\n\n<i>{st.format_compact()}</i>"
 
     # Обновить сообщение
     max_len = get_settings().telegram.message_max_length
@@ -562,6 +583,7 @@ def main() -> None:
     app.add_handler(CommandHandler("refresh", handle_refresh))
     app.add_handler(CommandHandler("metrics", handle_metrics))
     app.add_handler(CommandHandler("clear", handle_clear))
+    app.add_handler(CommandHandler("tokens", handle_tokens))
     app.add_handler(CommandHandler("history", handle_history_stats))
     app.add_handler(CallbackQueryHandler(handle_pagination_callback, pattern=r"^page:\d+$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))

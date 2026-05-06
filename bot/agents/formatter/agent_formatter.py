@@ -15,7 +15,7 @@ from openai import AsyncOpenAI
 
 from bot.agents.base import BaseAgent
 from bot.config import get_settings
-from bot.metrics import metrics, save_provider_response, track_time
+from bot.metrics import metrics, save_provider_response, session_tokens, track_time
 from bot.utils import RateLimiter
 from bot_lib.exceptions import AIRateLimitError, AIResponseError
 
@@ -87,6 +87,8 @@ class FormatterAgent(BaseAgent):
         self,
         user_text: str,
         history: list[dict[str, str]],
+        *,
+        chat_id: int | None = None,
     ) -> tuple[str, list[dict[str, str]]]:
         """Не используется напрямую — форматирование через format_response()."""
         return user_text, history
@@ -95,12 +97,15 @@ class FormatterAgent(BaseAgent):
         self,
         raw_answer: str,
         user_question: str = "",
+        *,
+        chat_id: int | None = None,
     ) -> str:
         """Отформатировать ответ агента для Telegram.
 
         Args:
             raw_answer: исходный текст ответа (может быть plain text или частично HTML)
             user_question: оригинальный вопрос пользователя (для контекста)
+            chat_id: ID чата для трекинга токенов по сессии
 
         Returns:
             Отформатированный HTML-ответ для Telegram
@@ -142,20 +147,22 @@ class FormatterAgent(BaseAgent):
             input_price, output_price = pricing.get_prices(self._model)
             # Извлечь cost_rub из ответа провайдера (если доступен)
             cost_rub = getattr(usage, "cost_rub", None)
+            in_tok = usage.prompt_tokens or 0
+            out_tok = usage.completion_tokens or 0
             metrics.track_ai_usage(
                 model=self._model,
-                input_tokens=usage.prompt_tokens or 0,
-                output_tokens=usage.completion_tokens or 0,
+                input_tokens=in_tok,
+                output_tokens=out_tok,
                 input_price_per_1m=input_price,
                 output_price_per_1m=output_price,
                 cost_rub=cost_rub,
             )
+            # Записать токены в per-session трекер
+            if chat_id is not None:
+                session_tokens.record(chat_id, input_tokens=in_tok, output_tokens=out_tok)
             log.debug(
-                "AI usage [formatter]: model=%s in=%d out=%d cost_rub=%s",
-                self._model,
-                usage.prompt_tokens or 0,
-                usage.completion_tokens or 0,
-                cost_rub,
+                "AI usage [formatter]: model=%s in=%d out=%d cost_rub=%s chat_id=%s",
+                self._model, in_tok, out_tok, cost_rub, chat_id,
             )
 
         # Сохранить ответ провайдера

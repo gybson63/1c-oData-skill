@@ -18,13 +18,14 @@ from __future__ import annotations
 import json
 import logging
 import re
+from contextvars import ContextVar
 from typing import Any
 
 from openai import AsyncOpenAI, BadRequestError
 
 from bot.agents.base import BaseAgent
 from bot.config import get_settings
-from bot.metrics import metrics, save_provider_response, track_time
+from bot.metrics import metrics, save_provider_response, session_tokens, track_time
 from bot.utils import RateLimiter, esc_html
 from bot_lib.exceptions import AIError, AIRateLimitError, AIResponseError, ODataError
 
@@ -46,6 +47,9 @@ _DEFAULT_MAX_SAMPLE_RECORDS = 30
 _DEFAULT_MAX_DATA_LENGTH = 8000
 _DEFAULT_STEP1_TEMPERATURE = 0.1
 _DEFAULT_STEP2_TEMPERATURE = 0.3
+
+# ContextVar для передачи chat_id в глубину стека вызовов (async-safe)
+_current_chat_id: ContextVar[int | None] = ContextVar("_current_chat_id", default=None)
 
 
 class QueryError(Exception):
@@ -225,12 +229,20 @@ class ODataAgent(BaseAgent):
         self,
         user_text: str,
         history: list[dict[str, str]],
+        *,
+        chat_id: int | None = None,
     ) -> tuple[str, list[dict[str, str]]]:
         """Основной метод обработки сообщения.
+
+        Args:
+            user_text: текст сообщения от пользователя
+            history: история диалога
+            chat_id: ID чата для трекинга токенов по сессии
 
         Returns:
             (answer_html, updated_history)
         """
+        token = _current_chat_id.set(chat_id)
         try:
             return await self._process_internal(user_text, history)
         except ODataError as e:
@@ -270,6 +282,8 @@ class ODataAgent(BaseAgent):
             history.append({"role": "user", "content": user_text})
             history.append({"role": "assistant", "content": answer})
             return answer, history[-(self._history_max_turns * 2):]
+        finally:
+            _current_chat_id.reset(token)
 
     # -- AI interaction helpers --
 
@@ -308,7 +322,7 @@ class ODataAgent(BaseAgent):
         return AIError(f"Ошибка AI-сервиса: {exc}")
 
     def _track_ai_response(self, response, step: str) -> None:
-        """Извлечь usage из ответа AI и записать в метрики."""
+        """Извлечь usage из ответа AI и записать в метрики + session tokens."""
         usage = getattr(response, "usage", None)
         if usage:
             settings = get_settings()
@@ -316,20 +330,23 @@ class ODataAgent(BaseAgent):
             input_price, output_price = pricing.get_prices(self._model)
             # Извлечь cost_rub из ответа провайдера (если доступен)
             cost_rub = getattr(usage, "cost_rub", None)
+            in_tok = usage.prompt_tokens or 0
+            out_tok = usage.completion_tokens or 0
             metrics.track_ai_usage(
                 model=self._model,
-                input_tokens=usage.prompt_tokens or 0,
-                output_tokens=usage.completion_tokens or 0,
+                input_tokens=in_tok,
+                output_tokens=out_tok,
                 input_price_per_1m=input_price,
                 output_price_per_1m=output_price,
                 cost_rub=cost_rub,
             )
+            # Записать токены в per-session трекер (если chat_id задан)
+            chat_id = _current_chat_id.get()
+            if chat_id is not None:
+                session_tokens.record(chat_id, input_tokens=in_tok, output_tokens=out_tok)
             log.debug(
-                "AI usage [%s]: model=%s in=%d out=%d cost_rub=%s",
-                step, self._model,
-                usage.prompt_tokens or 0,
-                usage.completion_tokens or 0,
-                cost_rub,
+                "AI usage [%s]: model=%s in=%d out=%d cost_rub=%s chat_id=%s",
+                step, self._model, in_tok, out_tok, cost_rub, chat_id,
             )
 
     async def _step1_call_ai(

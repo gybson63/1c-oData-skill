@@ -346,6 +346,100 @@ def reset_metrics() -> None:
 
 
 # ---------------------------------------------------------------------------
+# SessionTokenTracker — per-session token accounting
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class SessionTokens:
+    """Счётчик токенов для одной сессии (чата)."""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    requests: int = 0
+
+    def record(self, input_tokens: int, output_tokens: int) -> None:
+        self.input_tokens += input_tokens
+        self.output_tokens += output_tokens
+        self.requests += 1
+
+    @property
+    def total_tokens(self) -> int:
+        return self.input_tokens + self.output_tokens
+
+    def format_compact(self) -> str:
+        """Компактная строка: 📥1234 📤567."""
+        return f"📥{self.input_tokens:,} 📤{self.output_tokens:,}"
+
+    def format_detail(self) -> str:
+        """Детальная строка для /tokens."""
+        return (
+            f"  • Запросов: {self.requests}\n"
+            f"  • Входящих (input): {self.input_tokens:,}\n"
+            f"  • Исходящих (output): {self.output_tokens:,}\n"
+            f"  • Всего: {self.total_tokens:,}"
+        )
+
+
+class SessionTokenTracker:
+    """Трекинг токенов по сессиям (chat_id).
+
+    Используется для отображения пользователю текущего расхода токенов
+    в рамках его чата с ботом.
+
+    Использование::
+
+        from bot.metrics import session_tokens
+
+        # Записать токены
+        session_tokens.record(chat_id=123, input_tokens=100, output_tokens=50)
+
+        # Получить компактную строку для подписи к ответу
+        footer = session_tokens.get_compact(chat_id)
+
+        # Сбросить при /clear
+        session_tokens.clear(chat_id)
+    """
+
+    def __init__(self) -> None:
+        self._sessions: dict[int, SessionTokens] = {}
+
+    def record(self, chat_id: int, input_tokens: int, output_tokens: int) -> None:
+        """Записать токены для сессии."""
+        self._sessions.setdefault(chat_id, SessionTokens()).record(input_tokens, output_tokens)
+
+    def get(self, chat_id: int) -> SessionTokens:
+        """Получить счётчик сессии (или пустой)."""
+        return self._sessions.get(chat_id, SessionTokens())
+
+    def clear(self, chat_id: int) -> None:
+        """Сбросить токены для сессии."""
+        if chat_id in self._sessions:
+            del self._sessions[chat_id]
+
+    def get_compact(self, chat_id: int) -> str:
+        """Компактная строка с токенами для подписи к ответу."""
+        return self.get(chat_id).format_compact()
+
+    def format_session_report(self, chat_id: int) -> str:
+        """Детальный отчёт по сессии для /tokens."""
+        s = self.get(chat_id)
+        lines = [
+            "📊 <b>Токены текущей сессии</b>",
+            "",
+            s.format_detail(),
+        ]
+        return "\n".join(lines)
+
+    @property
+    def session_count(self) -> int:
+        return len(self._sessions)
+
+
+session_tokens = SessionTokenTracker()
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
