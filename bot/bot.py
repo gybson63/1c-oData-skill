@@ -3,13 +3,15 @@
 
 Загружает конфигурацию, инициализирует агентов и маршрутизирует
 сообщения Telegram к соответствующему агенту.
+
+Архитектура:
+  ChatManager → Chat → Agent (process_message) → FormatterAgent → Telegram
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import logging
 import re
 import sys
@@ -21,7 +23,7 @@ _PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update  # noqa: E402
+from telegram import Update  # noqa: E402
 from telegram.error import BadRequest, TimedOut  # noqa: E402
 from telegram.ext import (  # noqa: E402
     ApplicationBuilder,
@@ -36,6 +38,7 @@ from telegram.request import HTTPXRequest  # noqa: E402
 from bot.agents.base import BaseAgent  # noqa: E402
 from bot.agents.formatter import FormatterAgent  # noqa: E402
 from bot.agents.odata import ODataAgent  # noqa: E402
+from bot.chat import ChatManager  # noqa: E402
 from bot.config import build_global_config, get_settings, load_settings  # noqa: E402
 from bot.history import HistoryManager  # noqa: E402
 from bot.logging_config import setup_logging  # noqa: E402
@@ -56,8 +59,7 @@ log = logging.getLogger(__name__)
 # Global state
 # ---------------------------------------------------------------------------
 
-_agents: dict[str, BaseAgent] = {}  # name → agent instance
-_history_mgr: HistoryManager | None = None  # управляет историей чатов
+_chat_mgr: ChatManager | None = None  # единая точка входа для работы с чатами
 
 AGENT_REGISTRY: dict[str, type[BaseAgent]] = {
     "odata": ODataAgent,
@@ -67,17 +69,17 @@ AGENT_REGISTRY: dict[str, type[BaseAgent]] = {
     # "reports": ReportsAgent,
 }
 
-# Ссылка на форматтер (инициализируется автоматически)
-_formatter: FormatterAgent | None = None
-
 
 # ---------------------------------------------------------------------------
 # Agent lifecycle
 # ---------------------------------------------------------------------------
 
 async def init_agents(profile_cfg: dict[str, Any], cache_dir: str, env_file: str) -> None:
-    """Инициализация всех настроенных агентов."""
-    global _agents, _formatter
+    """Инициализация всех настроенных агентов + создание ChatManager."""
+    global _chat_mgr
+
+    agents: dict[str, BaseAgent] = {}
+    formatter: FormatterAgent | None = None
 
     agents_config = profile_cfg.get("agents", {})
     if not agents_config:
@@ -108,95 +110,107 @@ async def init_agents(profile_cfg: dict[str, Any], cache_dir: str, env_file: str
                 cache_dir=cache_dir,
                 env_file=env_file,
             )
-            _agents[agent_name] = agent
+            agents[agent_name] = agent
             log.info("Агент '%s' готов", agent_name)
         except Exception as e:
             log.error("Ошибка инициализации агента '%s': %s", agent_name, e)
 
     # Авто-инициализация форматтера, если он не задан в конфигурации явно
-    if "formatter" not in _agents:
+    if "formatter" not in agents:
         formatter_cfg = profile_cfg.get("formatter", {})
-        formatter = FormatterAgent()
+        fmt = FormatterAgent()
         try:
-            await formatter.initialize(
+            await fmt.initialize(
                 agent_config=formatter_cfg,
                 global_config=global_config,
                 cache_dir=cache_dir,
                 env_file=env_file,
             )
-            _formatter = formatter
+            formatter = fmt
             log.info("FormatterAgent автоматически инициализирован (не в agents)")
         except Exception as e:
             log.warning("Не удалось инициализировать FormatterAgent: %s", e)
     else:
-        _formatter = _agents["formatter"]  # type: ignore[assignment]
+        formatter = agents["formatter"]  # type: ignore[assignment]
+
+    # Создать HistoryManager
+    settings = get_settings()
+    hs = settings.history
+    history_mgr = HistoryManager(
+        max_messages=hs.max_messages,
+        trim_to=hs.trim_to,
+        persist_dir=hs.persist_dir,
+    )
+    log.info(
+        "HistoryManager: max_messages=%d, trim_to=%d, persist_dir=%s",
+        hs.max_messages, hs.trim_to, hs.persist_dir or "(in-memory)",
+    )
+
+    # Создать ChatManager
+    _chat_mgr = ChatManager(
+        agents=agents,
+        formatter=formatter,
+        history_mgr=history_mgr,
+    )
+
+    if agents:
+        log.info("Агентов загружено: %d (%s)", len(agents), ", ".join(agents.keys()))
+    else:
+        log.error("Ни один агент не был загружен")
 
 
 async def shutdown_agents() -> None:
     """Корректное завершение всех агентов."""
-    for name, agent in _agents.items():
+    if not _chat_mgr:
+        return
+    for name, agent in _chat_mgr.agents.items():
         try:
             await agent.shutdown()
             log.info("Агент '%s' остановлен", name)
         except Exception as e:
             log.error("Ошибка остановки агента '%s': %s", name, e)
-    _agents.clear()
 
 
 # ---------------------------------------------------------------------------
-# Default agent (for routing)
+# Telegram send helper
 # ---------------------------------------------------------------------------
 
-def _default_agent() -> BaseAgent | None:
-    """Вернуть агент по умолчанию (первый odata, или просто первый)."""
-    if "odata" in _agents:
-        return _agents["odata"]
-    if _agents:
-        return next(iter(_agents.values()))
-    return None
+async def _send_telegram_reply(
+    update: Update,
+    text: str,
+    reply_markup=None,
+) -> None:
+    """Отправить ответ в Telegram с fallback-обработкой ошибок."""
+    settings = get_settings()
+    max_len = settings.telegram.message_max_length
 
-
-# ---------------------------------------------------------------------------
-# Pagination helpers
-# ---------------------------------------------------------------------------
-
-def _extract_pagination_context(history: list[dict]) -> dict | None:
-    """Извлечь контекст пагинации из **последнего** assistant-сообщения в истории.
-
-    Проверяем только самое последнее сообщение — иначе при ошибочном ответе
-    (не JSON) функция найдёт pagination-контекст от предыдущего успешного
-    запроса и покажет кнопку «Следующие» на ошибке.
-    """
-    if not history:
-        return None
-    # Берём только последнее assistant-сообщение
-    for msg in reversed(history):
-        if msg.get("role") == "assistant":
-            content = msg.get("content", "")
+    try:
+        await update.message.reply_text(text, parse_mode="HTML", reply_markup=reply_markup)
+    except BadRequest as e:
+        log.warning("Telegram BadRequest при HTML-отправке: %s. Отправляю plain text.", e)
+        try:
+            plain = re.sub(r"<[^>]+>", "", text)
+            if len(plain) > max_len:
+                plain = plain[:max_len] + "... (сообщение сокращено)"
+            await update.message.reply_text(plain, reply_markup=reply_markup)
+        except Exception:
+            log.error("Telegram не удалось отправить даже plain text")
+    except TimedOut:
+        tg_settings = get_settings().telegram
+        sent = False
+        for attempt in range(tg_settings.retry_count):
+            log.warning("Telegram reply_text TimedOut, retry %d/%d", attempt + 1, tg_settings.retry_count)
+            await asyncio.sleep(tg_settings.retry_delay)
             try:
-                data = json.loads(content)
-                if isinstance(data, dict) and "entity" in data:
-                    return data
-            except (json.JSONDecodeError, TypeError):
-                pass
-            break  # проверяем только последнее — не идём дальше в историю
-    return None
-
-
-def _build_pagination_keyboard(pagination_ctx: dict | None) -> InlineKeyboardMarkup | None:
-    """Построить inline-клавиатуру для пагинации, если есть ещё записи."""
-    if not pagination_ctx:
-        return None
-    total = pagination_ctx.get("total", 0)
-    skip = pagination_ctx.get("skip", 0)
-    shown = pagination_ctx.get("shown", 0)
-    if skip + shown < total:
-        top = pagination_ctx.get("top", 20)
-        next_skip = skip + top
-        return InlineKeyboardMarkup([
-            [InlineKeyboardButton("➡️ Следующие", callback_data=f"page:{next_skip}")],
-        ])
-    return None
+                await update.message.reply_text(text, parse_mode="HTML", reply_markup=reply_markup)
+                sent = True
+                break
+            except TimedOut:
+                continue
+            except BadRequest:
+                break
+        if not sent:
+            log.error("Telegram reply_text failed after retries (TimedOut)")
 
 
 # ---------------------------------------------------------------------------
@@ -205,7 +219,8 @@ def _build_pagination_keyboard(pagination_ctx: dict | None) -> InlineKeyboardMar
 
 async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Команда /start."""
-    agent_names = ", ".join(_agents.keys()) or "(нет)"
+    agents = _chat_mgr.agents if _chat_mgr else {}
+    agent_names = ", ".join(agents.keys()) or "(нет)"
     lines = [
         "🤖 <b>Бот для работы с 1С</b>",
         "",
@@ -225,12 +240,17 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Команда /status — показать статус всех агентов."""
-    if not _agents:
+    if not _chat_mgr:
+        await update.message.reply_text("⚠️ ChatManager не инициализирован.")
+        return
+
+    agents = _chat_mgr.agents
+    if not agents:
         await update.message.reply_text("⚠️ Нет подключённых агентов.")
         return
 
     lines = ["📊 <b>Статус агентов</b>\n"]
-    for name, agent in _agents.items():
+    for name, agent in agents.items():
         status = agent.get_status()
         status_icon = "✅" if status.get("initialized") else "❌"
         lines.append(f"{status_icon} <b>{name}</b>")
@@ -244,34 +264,28 @@ async def handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def handle_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Команда /clear — очистить историю диалога."""
-    if not _history_mgr:
-        await update.message.reply_text("⚠️ Менеджер истории не инициализирован.")
+    if not _chat_mgr:
+        await update.message.reply_text("⚠️ ChatManager не инициализирован.")
         return
 
     chat_id = update.effective_chat.id
-    _history_mgr.clear(chat_id)
-
-    # Сбросить контекст пагинации
-    agent = _agents.get("odata")
-    if agent and isinstance(agent, ODataAgent):
-        agent.clear_pagination_state(chat_id)
-
-    # Сбросить счётчик токенов сессии
-    session_tokens.clear(chat_id)
+    chat = _chat_mgr.get_or_create(chat_id)
+    chat.clear()
 
     await update.message.reply_text("🗑 История диалога очищена.")
 
 
 async def handle_history_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Команда /history — показать статистику истории."""
-    if not _history_mgr:
-        await update.message.reply_text("⚠️ Менеджер истории не инициализирован.")
+    if not _chat_mgr:
+        await update.message.reply_text("⚠️ ChatManager не инициализирован.")
         return
 
     chat_id = update.effective_chat.id
-    history = _history_mgr.get(chat_id)
-    total_chats = _history_mgr.chat_count()
-    total_msgs = _history_mgr.total_messages()
+    history_mgr = _chat_mgr.history_mgr
+    history = history_mgr.get(chat_id)
+    total_chats = history_mgr.chat_count()
+    total_msgs = history_mgr.total_messages()
 
     lines = [
         "📜 <b>Статистика истории</b>",
@@ -280,9 +294,9 @@ async def handle_history_stats(update: Update, context: ContextTypes.DEFAULT_TYP
         f"Всего чатов с историей: <b>{total_chats}</b>",
         f"Всего сообщений: <b>{total_msgs}</b>",
         "",
-        f"Лимит сообщений на чат: {_history_mgr._max}",
-        f"Обрезка до: {_history_mgr._trim_to}",
-        f"Персистентность: {'✅ да' if _history_mgr._persist_dir else '❌ нет'}",
+        f"Лимит сообщений на чат: {history_mgr._max}",
+        f"Обрезка до: {history_mgr._trim_to}",
+        f"Персистентность: {'✅ да' if history_mgr._persist_dir else '❌ нет'}",
     ]
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
@@ -302,12 +316,17 @@ async def handle_tokens(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def handle_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Команда /refresh — обновить данные всех агентов."""
-    if not _agents:
+    if not _chat_mgr:
+        await update.message.reply_text("⚠️ ChatManager не инициализирован.")
+        return
+
+    agents = _chat_mgr.agents
+    if not agents:
         await update.message.reply_text("⚠️ Нет подключённых агентов.")
         return
 
     results: list[str] = []
-    for name, agent in _agents.items():
+    for name, agent in agents.items():
         try:
             await agent.refresh()
             results.append(f"✅ {name}")
@@ -321,29 +340,23 @@ async def handle_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработка текстового сообщения — маршрутизация агенту."""
+    """Обработка текстового сообщения — маршрутизация через ChatManager."""
     if not update.message or not update.message.text:
+        return
+
+    if not _chat_mgr:
+        log.error("ChatManager не инициализирован")
+        await update.message.reply_text("⚠️ Внутренняя ошибка: бот не готов.")
         return
 
     user_text = update.message.text.strip()
     chat_id = update.effective_chat.id
 
-    # Выбрать агента
-    agent = _default_agent()
-    if not agent:
-        await update.message.reply_text("⚠️ Нет доступных агентов для обработки запроса.")
-        return
+    chat = _chat_mgr.get_or_create(chat_id)
 
-    # Получить историю через HistoryManager
-    if not _history_mgr:
-        log.error("HistoryManager не инициализирован")
-        await update.message.reply_text("⚠️ Внутренняя ошибка: менеджер истории не готов.")
-        return
-    history = _history_mgr.get(chat_id)
-
-    # Обработка основным агентом
+    # Обработка через Chat (пайплайн: агент → форматирование → обрезка → пагинация)
     try:
-        answer, updated_history = await agent.process_message(user_text, history, chat_id=chat_id)
+        response = await chat.process_message(user_text)
     except ODataError as e:
         log.error("OData error in chat %s: %s", chat_id, e)
         await update.message.reply_text(f"⚠️ Ошибка OData: {e}")
@@ -361,66 +374,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text(f"⚠️ Непредвиденная ошибка: {e}")
         return
 
-    # Сохранить историю через HistoryManager (с автоматической обрезкой и персистентностью)
-    _history_mgr.save(chat_id, updated_history)
-
-    # Форматирование через FormatterAgent (если доступен)
-    if _formatter and _formatter.is_initialized:
-        try:
-            answer = await _formatter.format_response(answer, user_question=user_text, chat_id=chat_id)
-        except Exception as e:
-            log.warning("FormatterAgent: ошибка форматирования (%s), отправляю как есть", e)
-
-    # Подпись с токенами сессии
-    st = session_tokens.get(chat_id)
-    if st.requests > 0:
-        answer += f"\n\n<i>{st.format_compact()}</i>"
-
-    # Truncate (Telegram limit: 4096 chars)
-    settings = get_settings()
-    max_len = settings.telegram.message_max_length
-    if len(answer) > max_len:
-        answer = answer[:max_len] + "... (сообщение сокращено)"
-
-    # Санитизация HTML перед отправкой
-    safe_answer = sanitize_telegram_html(answer)
-
-    # Пагинация: проверить, есть ли ещё записи для показа
-    reply_markup = None
-    if isinstance(agent, ODataAgent):
-        pagination_ctx = _extract_pagination_context(updated_history)
-        if pagination_ctx:
-            agent.save_pagination_state(chat_id, pagination_ctx)
-            reply_markup = _build_pagination_keyboard(pagination_ctx)
-
-    # Отправить: сначала с HTML, при BadRequest — plain text fallback
-    try:
-        await update.message.reply_text(safe_answer, parse_mode="HTML", reply_markup=reply_markup)
-    except BadRequest as e:
-        log.warning("Telegram BadRequest при HTML-отправке: %s. Отправляю plain text.", e)
-        try:
-            plain = re.sub(r"<[^>]+>", "", safe_answer)
-            if len(plain) > max_len:
-                plain = plain[:max_len] + "... (сообщение сокращено)"
-            await update.message.reply_text(plain, reply_markup=reply_markup)
-        except Exception:
-            log.error("Telegram не удалось отправить даже plain text")
-    except TimedOut:
-        tg_settings = get_settings().telegram
-        sent = False
-        for attempt in range(tg_settings.retry_count):
-            log.warning("Telegram reply_text TimedOut, retry %d/%d", attempt + 1, tg_settings.retry_count)
-            await asyncio.sleep(tg_settings.retry_delay)
-            try:
-                await update.message.reply_text(safe_answer, parse_mode="HTML", reply_markup=reply_markup)
-                sent = True
-                break
-            except TimedOut:
-                continue
-            except BadRequest:
-                break
-        if not sent:
-            log.error("Telegram reply_text failed after retries (TimedOut)")
+    # Только отправка в Telegram (transport layer)
+    await _send_telegram_reply(update, response.text, response.reply_markup)
 
 
 async def handle_pagination_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -428,11 +383,15 @@ async def handle_pagination_callback(update: Update, context: ContextTypes.DEFAU
     query = update.callback_query
     await query.answer()
 
-    # Мгновенная обратная связь — показать «Загрузка» до завершения запроса
+    # Мгновенная обратная связь — показать «Загрузка»
     try:
         await query.edit_message_text("⏳ <i>Загрузка данных...</i>", parse_mode="HTML")
     except Exception:
         pass  # сообщение могло уже измениться — не критично
+
+    if not _chat_mgr:
+        await query.edit_message_text("⚠️ ChatManager не инициализирован.")
+        return
 
     chat_id = update.effective_chat.id
     data = query.data or ""
@@ -448,36 +407,47 @@ async def handle_pagination_callback(update: Update, context: ContextTypes.DEFAU
         await query.answer("Ошибка пагинации", show_alert=True)
         return
 
-    # Найти OData-агент
-    agent = _agents.get("odata")
+    # Получить чат с контекстом пагинации
+    chat = _chat_mgr.get_or_create(chat_id)
+    pagination_ctx = chat.pagination_ctx
+    if not pagination_ctx:
+        await query.edit_message_text("⚠️ Контекст запроса потерян. Повторите запрос.")
+        return
+
+    # Найти OData-агент и выполнить запрос с новым skip
+    agent = _chat_mgr.agents.get("odata")
     if not agent or not isinstance(agent, ODataAgent):
         await query.edit_message_text("⚠️ Агент OData не доступен.")
         return
 
-    # Выполнить запрос с новым skip
     try:
-        answer, pagination_ctx = await agent.execute_page(chat_id, skip)
+        answer, new_ctx = await agent.execute_page_with_ctx(pagination_ctx, skip)
     except Exception as e:
         log.exception("Pagination error in chat %s", chat_id)
         await query.edit_message_text(f"⚠️ Ошибка: {e}")
         return
 
+    # Обновить контекст пагинации в чате
+    if new_ctx:
+        chat.save_pagination_state(new_ctx)
+
     # Форматирование через FormatterAgent
-    if _formatter and _formatter.is_initialized:
+    formatter = _chat_mgr.formatter
+    if formatter and formatter.is_initialized:
         try:
-            answer = await _formatter.format_response(answer, user_question="продолжение", chat_id=chat_id)
+            answer = await formatter.format_response(answer, user_question="продолжение", chat_id=chat_id)
         except Exception as e:
             log.warning("FormatterAgent: ошибка при пагинации (%s)", e)
 
     # Проверить, есть ли ещё страницы
-    reply_markup = _build_pagination_keyboard(pagination_ctx)
+    reply_markup = chat._build_pagination_keyboard(new_ctx)
 
     # Подпись с токенами
     st = session_tokens.get(chat_id)
     if st.requests > 0:
         answer += f"\n\n<i>{st.format_compact()}</i>"
 
-    # Обновить сообщение
+    # Обрезать и санитизировать
     max_len = get_settings().telegram.message_max_length
     if len(answer) > max_len:
         answer = answer[:max_len] + "... (сообщение сокращено)"
@@ -513,26 +483,7 @@ async def post_init(application) -> None:
         **build_global_config(settings),
     }
 
-    # Инициализировать HistoryManager с настройками
-    global _history_mgr
-    hs = settings.history
-    _history_mgr = HistoryManager(
-        max_messages=hs.max_messages,
-        trim_to=hs.trim_to,
-        persist_dir=hs.persist_dir,
-    )
-    log.info(
-        "HistoryManager: max_messages=%d, trim_to=%d, persist_dir=%s",
-        hs.max_messages, hs.trim_to, hs.persist_dir or "(in-memory)",
-    )
-
     await init_agents(profile_cfg, settings.cache_dir, "env.json")
-
-    # Log status
-    if _agents:
-        log.info("Агентов загружено: %d (%s)", len(_agents), ", ".join(_agents.keys()))
-    else:
-        log.error("Ни один агент не был загружен")
 
 
 async def post_shutdown(application) -> None:

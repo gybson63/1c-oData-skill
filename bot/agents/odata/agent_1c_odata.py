@@ -1128,6 +1128,30 @@ class ODataAgent(BaseAgent):
         if not ctx:
             return "⚠️ Контекст запроса потерян. Повторите запрос.", None
 
+        answer, new_ctx = await self.execute_page_with_ctx(ctx, skip)
+
+        # Обновить внутренний контекст пагинации
+        if new_ctx:
+            self._pagination_states[chat_id] = new_ctx
+
+        return answer, new_ctx
+
+    async def execute_page_with_ctx(
+        self,
+        ctx: dict[str, Any],
+        skip: int,
+    ) -> tuple[str, dict[str, Any | None]]:
+        """Выполнить запрос пагинации с явно переданным контекстом.
+
+        Не зависит от chat_id — контекст пагинации управляется извне (через Chat).
+
+        Args:
+            ctx: контекст пагинации (entity, filter, select, ...).
+            skip: значение $skip.
+
+        Returns:
+            Кортеж (answer_html, pagination_context или None).
+        """
         entity = ctx["entity"]
         filter_expr = ctx.get("filter")
         select = ctx.get("select")
@@ -1182,7 +1206,6 @@ class ODataAgent(BaseAgent):
             "total": total,
             "shown": shown,
         }
-        self._pagination_states[chat_id] = new_ctx
 
         return answer, new_ctx
 

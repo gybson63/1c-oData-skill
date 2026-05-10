@@ -32,16 +32,25 @@
                        │
                        ▼
 ┌──────────────────────────────────────────────────────────────────┐
-│                     bot/bot.py — Роутер                          │
+│                   bot/bot.py — Роутер (thin)                     │
 │  ┌─────────────┐  ┌──────────────┐  ┌────────────────────────┐  │
 │  │ /start      │  │ /metrics     │  │ handle_message()       │  │
-│  │ /status     │  │ /tokens      │  │   → routing к агенту   │  │
-│  │ /clear      │  │ /refresh     │  │   → FormatterAgent     │  │
-│  │ /history    │  │              │  │   → pagination         │  │
+│  │ /status     │  │ /tokens      │  │   → ChatManager        │  │
+│  │ /clear      │  │ /refresh     │  │   → Chat.process()     │  │
+│  │ /history    │  │              │  │   → _send_telegram()   │  │
 │  └─────────────┘  └──────────────┘  └──────────┬─────────────┘  │
 └─────────────────────────────────────────────────┼────────────────┘
                                                    │
                                                    ▼
+┌──────────────────────────────────────────────────────────────────┐
+│           bot/chat.py — ChatManager + Chat                       │
+│  ChatManager → get_or_create(chat_id) → Chat                    │
+│    └─ Chat.process_message(text):                                │
+│         Agent.process → Formatter → Truncate → Pagination       │
+│         → ChatResponse(text, reply_markup)                       │
+└──────────────────────────┬───────────────────────────────────────┘
+                           │
+                           ▼
 ┌──────────────────────────────────────────────────────────────────┐
 │              AGENT_REGISTRY (паттерн Registry)                   │
 │  ┌────────────────────────┐  ┌─────────────────────────────┐    │
@@ -694,6 +703,7 @@ class HistoryManager:
 |-----------|-----------|
 | Telegram | python-telegram-bot >= 20.0 |
 | AI | OpenAI Python SDK (любой OpenAI-совместимый API) |
+| Chat-слой | `bot/chat.py` (ChatManager + Chat + ChatResponse) |
 | MCP | mcp >= 1.0 (stdio + SSE transport) |
 | HTTP | httpx + tenacity (retry) |
 | Конфигурация | Pydantic + Pydantic Settings |
