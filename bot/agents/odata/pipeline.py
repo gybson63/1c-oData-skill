@@ -26,6 +26,7 @@ from openai import BadRequestError
 
 from bot.agents.odata.ai_service import AIService
 from bot.agents.odata.error_handler import QueryError
+from bot.agents.odata.prompts import ODATA_REFERENCE, STEP1_SYSTEM
 from bot.agents.odata.query_executor import QueryExecutor
 from bot.agents.odata.query_validator import QueryValidator
 from bot.agents.odata.state import ODataQuery, ODataState
@@ -36,7 +37,6 @@ from bot.agents.odata.tool_resolver import (
     TextToolCallResolver,
     ToolResolver,
 )
-from bot.agents.odata.prompts import ODATA_REFERENCE, STEP1_SYSTEM
 from bot.utils import esc_html
 
 log = logging.getLogger(__name__)

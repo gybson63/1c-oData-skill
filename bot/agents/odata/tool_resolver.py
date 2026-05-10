@@ -31,8 +31,6 @@ import re
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 
-from bot.utils import esc_html
-
 if TYPE_CHECKING:
     from bot.agents.odata.state import ODataQuery, ODataState
 

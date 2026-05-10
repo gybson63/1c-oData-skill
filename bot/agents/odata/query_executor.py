@@ -11,10 +11,8 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any
 
 from bot.agents.odata.odata_http import execute_odata_query
-from bot_lib.exceptions import ODataError
 
 log = logging.getLogger(__name__)
 
