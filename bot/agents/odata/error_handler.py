@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any
 
 from bot.utils import esc_html
 from bot_lib.exceptions import AIError, AIRateLimitError, ODataError

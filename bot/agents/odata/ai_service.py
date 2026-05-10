@@ -237,7 +237,7 @@ class AIService:
 
     def _track_ai_response(self, response, step: str) -> None:
         """Извлечь usage из ответа AI и записать в метрики."""
-        from bot.metrics import metrics, session_tokens
+        from bot.metrics import metrics
 
         usage = getattr(response, "usage", None)
         if not usage:
