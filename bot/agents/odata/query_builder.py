@@ -18,22 +18,47 @@ log = logging.getLogger(__name__)
 
 # Поля с высоким приоритетом (бизнес-суть) — раскрываются первыми.
 EXPAND_HIGH_PRIORITY: tuple[str, ...] = (
-    "Организация", "Контрагент", "Сотрудник", "ФизическоеЛицо",
-    "Номенклатура", "Склад", "Подразделение", "Должность",
-    "Валюта", "СтатьяЗатрат", "СтатьяТКРФ", "ОснованиеУвольнения",
-    "Основание", "Касса", "Банк", "Проект", "НаправлениеДеятельности",
-    "ВидОперации", "ХозОперация", "ВидРасчета", "ВыходноеПособие",
-    "Компенсация", "Статья",
+    "Организация",
+    "Контрагент",
+    "Сотрудник",
+    "ФизическоеЛицо",
+    "Номенклатура",
+    "Склад",
+    "Подразделение",
+    "Должность",
+    "Валюта",
+    "СтатьяЗатрат",
+    "СтатьяТКРФ",
+    "ОснованиеУвольнения",
+    "Основание",
+    "Касса",
+    "Банк",
+    "Проект",
+    "НаправлениеДеятельности",
+    "ВидОперации",
+    "ХозОперация",
+    "ВидРасчета",
+    "ВыходноеПособие",
+    "Компенсация",
+    "Статья",
 )
 
 # Системные/подписи — раскрываются последними (могут быть отброшены при лимите).
 EXPAND_LOW_PRIORITY: tuple[str, ...] = (
-    "Руководитель", "ГлавныйБухгалтер", "Бухгалтер",
-    "РаботникКадровойСлужбы", "Исполнитель", "Ответственный",
-    "ОтветственныйИсполнитель", "Рассчитал",
-    "ДолжностьРуководителя", "ДолжностьГлавногоБухгалтера",
-    "ДолжностьБухгалтера", "ДолжностьРаботникаКадровойСлужбы",
-    "ДолжностьИсполнителя", "ДолжностьОтветственногоИсполнителя",
+    "Руководитель",
+    "ГлавныйБухгалтер",
+    "Бухгалтер",
+    "РаботникКадровойСлужбы",
+    "Исполнитель",
+    "Ответственный",
+    "ОтветственныйИсполнитель",
+    "Рассчитал",
+    "ДолжностьРуководителя",
+    "ДолжностьГлавногоБухгалтера",
+    "ДолжностьБухгалтера",
+    "ДолжностьРаботникаКадровойСлужбы",
+    "ДолжностьИсполнителя",
+    "ДолжностьОтветственногоИсполнителя",
     "ИсправленныйДокумент",
 )
 
@@ -65,8 +90,13 @@ def expand_priority(nav_name: str) -> int:
 
 # Поля _Key, которые не являются навигационными свойствами
 _SKIP_KEY_FIELDS = (
-    "Ref_Key", "DataVersion", "Predefined", "PredefinedDataName",
-    "IsFolder", "LineNumber", "Parent_Key",
+    "Ref_Key",
+    "DataVersion",
+    "Predefined",
+    "PredefinedDataName",
+    "IsFolder",
+    "LineNumber",
+    "Parent_Key",
 )
 
 
@@ -96,7 +126,7 @@ def build_expand(
     nav_names: list[str] = []
 
     if select:
-        raw = select[len("$select="):] if select.startswith("$select=") else select
+        raw = select[len("$select=") :] if select.startswith("$select=") else select
         field_names = [f.strip() for f in raw.split(",") if f.strip()]
     else:
         field_names = entity_fields
@@ -116,7 +146,9 @@ def build_expand(
     if len(nav_names) > max_expand_fields:
         log.info(
             "$expand для %s: %d свойств → ограничено до %d (с приоритетом)",
-            entity, len(nav_names), max_expand_fields,
+            entity,
+            len(nav_names),
+            max_expand_fields,
         )
         nav_names = nav_names[:max_expand_fields]
 
@@ -128,6 +160,7 @@ def build_expand(
 # ---------------------------------------------------------------------------
 # Оценка и обрезка URL
 # ---------------------------------------------------------------------------
+
 
 def estimate_url_length(
     odata_url: str,
@@ -144,15 +177,15 @@ def estimate_url_length(
     if filter_expr:
         params.append(("$filter", filter_expr))
     if select:
-        raw = select[len("$select="):] if select.startswith("$select=") else select
+        raw = select[len("$select=") :] if select.startswith("$select=") else select
         params.append(("$select", raw))
     if orderby:
-        raw = orderby[len("$orderby="):] if orderby.startswith("$orderby=") else orderby
+        raw = orderby[len("$orderby=") :] if orderby.startswith("$orderby=") else orderby
         params.append(("$orderby", raw))
     if top:
         params.append(("$top", str(top)))
     if expand:
-        raw_expand = expand[len("$expand="):] if expand.startswith("$expand=") else expand
+        raw_expand = expand[len("$expand=") :] if expand.startswith("$expand=") else expand
         params.append(("$expand", raw_expand))
     url_str = base + "?" + "&".join(f"{k}={quote(v, safe='')}" for k, v in params)
     return len(url_str)
@@ -177,7 +210,13 @@ def trim_expand_for_url_limit(
         return expand
 
     url_len = estimate_url_length(
-        odata_url, entity, filter_expr, select, orderby, top, expand,
+        odata_url,
+        entity,
+        filter_expr,
+        select,
+        orderby,
+        top,
+        expand,
     )
     if url_len <= max_url_length:
         return expand
@@ -189,14 +228,27 @@ def trim_expand_for_url_limit(
         nav_list = nav_list[:-1]
         trimmed = ",".join(nav_list)
         url_len = estimate_url_length(
-            odata_url, entity, filter_expr, select, orderby, top, trimmed,
+            odata_url,
+            entity,
+            filter_expr,
+            select,
+            orderby,
+            top,
+            trimmed,
         )
         if url_len <= max_url_length:
             log.info(
                 "$expand сокращён: %d → %d свойств (URL %d → %d)",
-                original_len, len(nav_list),
+                original_len,
+                len(nav_list),
                 estimate_url_length(
-                    odata_url, entity, filter_expr, select, orderby, top, expand,
+                    odata_url,
+                    entity,
+                    filter_expr,
+                    select,
+                    orderby,
+                    top,
+                    expand,
                 ),
                 url_len,
             )

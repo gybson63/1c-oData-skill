@@ -152,9 +152,7 @@ class TestIterHelpers:
         from xml.etree import ElementTree as ET
 
         root = ET.fromstring(sample_metadata_xml)
-        catalog_type = next(
-            et for et in iter_entity_types(root) if et.get("Name") == "Catalog_Сотрудники"
-        )
+        catalog_type = next(et for et in iter_entity_types(root) if et.get("Name") == "Catalog_Сотрудники")
         props = list(iter_properties(catalog_type))
         prop_names = [p.get("Name") for p in props]
         assert "Description" in prop_names
@@ -164,9 +162,7 @@ class TestIterHelpers:
         from xml.etree import ElementTree as ET
 
         root = ET.fromstring(sample_metadata_xml)
-        doc_type = next(
-            et for et in iter_entity_types(root) if et.get("Name") == "Document_Увольнение"
-        )
+        doc_type = next(et for et in iter_entity_types(root) if et.get("Name") == "Document_Увольнение")
         nav_props = list(iter_nav_properties(doc_type))
         nav_names = [p.get("Name") for p in nav_props]
         assert "Сотрудник" in nav_names
@@ -175,9 +171,7 @@ class TestIterHelpers:
         from xml.etree import ElementTree as ET
 
         root = ET.fromstring(sample_metadata_xml)
-        catalog_type = next(
-            et for et in iter_entity_types(root) if et.get("Name") == "Catalog_Сотрудники"
-        )
+        catalog_type = next(et for et in iter_entity_types(root) if et.get("Name") == "Catalog_Сотрудники")
         nav_props = list(iter_nav_properties(catalog_type))
         assert len(nav_props) == 0
 
@@ -191,9 +185,7 @@ class TestClassifyEntitySets:
     """Тесты для classify_entity_sets."""
 
     def test_classifies_catalog_and_document(self, sample_metadata_xml: str):
-        type_counts, type_names, entity_sets, namespace = classify_entity_sets(
-            sample_metadata_xml
-        )
+        type_counts, type_names, entity_sets, namespace = classify_entity_sets(sample_metadata_xml)
         assert namespace == "TestConfig"
         assert type_counts.get("Catalog") == 1
         assert type_counts.get("Document") == 1

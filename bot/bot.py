@@ -15,6 +15,7 @@ import asyncio
 import logging
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +25,7 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 from telegram import Update  # noqa: E402
-from telegram.error import BadRequest, TimedOut  # noqa: E402
+from telegram.error import BadRequest, NetworkError, TimedOut  # noqa: E402
 from telegram.ext import (  # noqa: E402
     ApplicationBuilder,
     CallbackQueryHandler,
@@ -33,12 +34,11 @@ from telegram.ext import (  # noqa: E402
     MessageHandler,
     filters,
 )
-from telegram.request import HTTPXRequest  # noqa: E402
 
 from bot.agents.base import BaseAgent  # noqa: E402
 from bot.agents.formatter import FormatterAgent  # noqa: E402
 from bot.agents.odata import ODataAgent  # noqa: E402
-from bot.chat import ChatManager  # noqa: E402
+from bot.chat import ChatManager, PaginationError  # noqa: E402
 from bot.config import build_global_config, get_settings, load_settings  # noqa: E402
 from bot.history import HistoryManager  # noqa: E402
 from bot.logging_config import setup_logging  # noqa: E402
@@ -50,7 +50,7 @@ from bot.metrics import (  # noqa: E402
     setup_cost_logging,
     setup_provider_response_logging,
 )
-from bot.utils import sanitize_telegram_html  # noqa: E402
+from bot.telegram_transport import LoggingHTTPXRequest  # noqa: E402
 from bot_lib.exceptions import AIError, ODataError, ODataSkillError  # noqa: E402
 
 log = logging.getLogger(__name__)
@@ -73,6 +73,7 @@ AGENT_REGISTRY: dict[str, type[BaseAgent]] = {
 # ---------------------------------------------------------------------------
 # Agent lifecycle
 # ---------------------------------------------------------------------------
+
 
 async def init_agents(profile_cfg: dict[str, Any], cache_dir: str, env_file: str) -> None:
     """Инициализация всех настроенных агентов + создание ChatManager."""
@@ -143,7 +144,9 @@ async def init_agents(profile_cfg: dict[str, Any], cache_dir: str, env_file: str
     )
     log.info(
         "HistoryManager: max_messages=%d, trim_to=%d, persist_dir=%s",
-        hs.max_messages, hs.trim_to, hs.persist_dir or "(in-memory)",
+        hs.max_messages,
+        hs.trim_to,
+        hs.persist_dir or "(in-memory)",
     )
 
     # Создать ChatManager
@@ -175,14 +178,45 @@ async def shutdown_agents() -> None:
 # Telegram send helper
 # ---------------------------------------------------------------------------
 
+
 async def _send_telegram_reply(
     update: Update,
     text: str,
     reply_markup=None,
+    attachments: list | None = None,
 ) -> None:
     """Отправить ответ в Telegram с fallback-обработкой ошибок."""
     settings = get_settings()
     max_len = settings.telegram.message_max_length
+
+    photo_attachments = [att for att in (attachments or []) if att.content_type.startswith("image/")]
+
+    if photo_attachments:
+        photo = photo_attachments[0]
+        caption = text
+        caption_max = 1024
+        if len(caption) > caption_max:
+            caption = caption[:caption_max] + "... (сокращено)"
+        try:
+            await update.message.reply_photo(
+                photo=photo.data,
+                caption=caption,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+            )
+        except BadRequest as e:
+            log.warning("Telegram BadRequest при отправке photo: %s", e)
+            await update.message.reply_photo(photo=photo.data, reply_markup=reply_markup)
+        if len(text) > caption_max:
+            remainder = text[caption_max:]
+            if len(remainder) > max_len:
+                remainder = remainder[:max_len] + "... (сообщение сокращено)"
+            try:
+                await update.message.reply_text(remainder, parse_mode="HTML")
+            except BadRequest:
+                plain = re.sub(r"<[^>]+>", "", remainder)
+                await update.message.reply_text(plain)
+        return
 
     try:
         await update.message.reply_text(text, parse_mode="HTML", reply_markup=reply_markup)
@@ -216,6 +250,7 @@ async def _send_telegram_reply(
 # ---------------------------------------------------------------------------
 # Telegram handlers
 # ---------------------------------------------------------------------------
+
 
 async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Команда /start."""
@@ -294,9 +329,9 @@ async def handle_history_stats(update: Update, context: ContextTypes.DEFAULT_TYP
         f"Всего чатов с историей: <b>{total_chats}</b>",
         f"Всего сообщений: <b>{total_msgs}</b>",
         "",
-        f"Лимит сообщений на чат: {history_mgr._max}",
-        f"Обрезка до: {history_mgr._trim_to}",
-        f"Персистентность: {'✅ да' if history_mgr._persist_dir else '❌ нет'}",
+        f"Лимит сообщений на чат: {history_mgr.max_messages}",
+        f"Обрезка до: {history_mgr.trim_to}",
+        f"Персистентность: {'✅ да' if history_mgr.is_persistent else '❌ нет'}",
     ]
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
@@ -375,7 +410,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     # Только отправка в Telegram (transport layer)
-    await _send_telegram_reply(update, response.text, response.reply_markup)
+    await _send_telegram_reply(
+        update,
+        response.text,
+        response.reply_markup,
+        attachments=response.attachments,
+    )
 
 
 async def handle_pagination_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -407,70 +447,54 @@ async def handle_pagination_callback(update: Update, context: ContextTypes.DEFAU
         await query.answer("Ошибка пагинации", show_alert=True)
         return
 
-    # Получить чат с контекстом пагинации
+    # Обработка через Chat (тот же пайплайн, что и для обычного сообщения)
     chat = _chat_mgr.get_or_create(chat_id)
-    pagination_ctx = chat.pagination_ctx
-    if not pagination_ctx:
-        await query.edit_message_text("⚠️ Контекст запроса потерян. Повторите запрос.")
-        return
-
-    # Найти OData-агент и выполнить запрос с новым skip
-    agent = _chat_mgr.agents.get("odata")
-    if not agent or not isinstance(agent, ODataAgent):
-        await query.edit_message_text("⚠️ Агент OData не доступен.")
-        return
-
     try:
-        answer, new_ctx = await agent.execute_page_with_ctx(pagination_ctx, skip)
+        response = await chat.process_pagination(skip)
+    except PaginationError as e:
+        await query.edit_message_text(f"⚠️ {e}")
+        return
     except Exception as e:
         log.exception("Pagination error in chat %s", chat_id)
         await query.edit_message_text(f"⚠️ Ошибка: {e}")
         return
 
-    # Обновить контекст пагинации в чате
-    if new_ctx:
-        chat.save_pagination_state(new_ctx)
-
-    # Форматирование через FormatterAgent
-    formatter = _chat_mgr.formatter
-    if formatter and formatter.is_initialized:
-        try:
-            answer = await formatter.format_response(answer, user_question="продолжение", chat_id=chat_id)
-        except Exception as e:
-            log.warning("FormatterAgent: ошибка при пагинации (%s)", e)
-
-    # Проверить, есть ли ещё страницы
-    reply_markup = chat._build_pagination_keyboard(new_ctx)
-
-    # Подпись с токенами
-    st = session_tokens.get(chat_id)
-    if st.requests > 0:
-        answer += f"\n\n<i>{st.format_compact()}</i>"
-
-    # Обрезать и санитизировать
-    max_len = get_settings().telegram.message_max_length
-    if len(answer) > max_len:
-        answer = answer[:max_len] + "... (сообщение сокращено)"
-
-    safe_answer = sanitize_telegram_html(answer)
-
     try:
-        await query.edit_message_text(safe_answer, parse_mode="HTML", reply_markup=reply_markup)
+        await query.edit_message_text(response.text, parse_mode="HTML", reply_markup=response.reply_markup)
     except BadRequest as e:
         log.warning("Pagination edit BadRequest: %s. Sending new message.", e)
         try:
-            await query.message.reply_text(safe_answer, parse_mode="HTML", reply_markup=reply_markup)
+            await query.message.reply_text(response.text, parse_mode="HTML", reply_markup=response.reply_markup)
         except Exception:
             log.error("Pagination: не удалось отправить сообщение")
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    log.exception("PTB error", exc_info=context.error)
+    error = context.error
+    extra: dict[str, Any] = {"error_type": type(error).__name__ if error else "Unknown"}
+    if isinstance(update, Update):
+        if update.effective_chat:
+            extra["chat_id"] = update.effective_chat.id
+        extra["update_type"] = update.update_type
+    log.error("PTB error: %s", error, extra=extra, exc_info=error)
 
 
 # ---------------------------------------------------------------------------
 # Lifecycle hooks
 # ---------------------------------------------------------------------------
+
+
+async def _announce_telegram_ready(application) -> None:
+    """Сообщить о готовности после старта polling и Application.start()."""
+    if not _chat_mgr or not _chat_mgr.agents:
+        log.error("Бот не запущен: агенты не инициализированы")
+        return
+
+    while not application.running:
+        await asyncio.sleep(0.05)
+
+    log.info("Бот приступил к работе")
+
 
 async def post_init(application) -> None:
     """Called after the Telegram app is fully initialized."""
@@ -484,6 +508,7 @@ async def post_init(application) -> None:
     }
 
     await init_agents(profile_cfg, settings.cache_dir, "env.json")
+    application.create_task(_announce_telegram_ready(application))
 
 
 async def post_shutdown(application) -> None:
@@ -495,21 +520,27 @@ async def post_shutdown(application) -> None:
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main() -> None:
     _root = Path(__file__).parent.parent
     parser = argparse.ArgumentParser(description="1С Telegram Bot (Multi-Agent)")
     parser.add_argument("--env-file", default=str(_root / "env.json"))
     parser.add_argument("--profile", default="default")
     parser.add_argument("--cache-dir", default=str(_root / ".cache"))
-    parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+    parser.add_argument(
+        "--log-level",
+        default=None,
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="Уровень логирования (CLI имеет приоритет над конфигом)",
+    )
     parser.add_argument("--log-file", default=None, help="Путь к файлу лога (поворот 5 МБ)")
     args = parser.parse_args()
 
     # Загрузить типизированную конфигурацию через Pydantic Settings
     settings = load_settings(env_file=args.env_file, profile=args.profile)
 
-    # Настроить логирование (используем уровень из конфига, CLI имеет приоритет)
-    log_level = args.log_level or settings.log_level
+    # Настроить логирование (CLI имеет приоритет над конфигом)
+    log_level = args.log_level or settings.log_level or "INFO"
     log_file = args.log_file or settings.log_file
     setup_logging(level=log_level, log_file=log_file)
 
@@ -521,21 +552,32 @@ def main() -> None:
 
     tg = settings.telegram
 
-    # Увеличенные таймауты для Telegram API (default ~10s слишком мало при долгой обработке)
-    request = HTTPXRequest(
-        connect_timeout=tg.connect_timeout,
-        read_timeout=tg.read_timeout,
-        write_timeout=tg.write_timeout,
-    )
+    request_kwargs: dict[str, Any] = {
+        "connect_timeout": tg.connect_timeout,
+        "read_timeout": tg.read_timeout,
+        "write_timeout": tg.write_timeout,
+    }
+    if tg.proxy_url:
+        request_kwargs["proxy"] = tg.proxy_url
+    if tg.use_env_proxy:
+        request_kwargs["httpx_kwargs"] = {"trust_env": True}
+    elif tg.proxy_url:
+        request_kwargs["httpx_kwargs"] = {"trust_env": False}
 
-    app = (
+    request = LoggingHTTPXRequest(**request_kwargs)
+
+    builder = (
         ApplicationBuilder()
         .token(settings.bot.token)
         .post_init(post_init)
         .post_shutdown(post_shutdown)
         .request(request)
-        .build()
     )
+    if tg.base_url:
+        builder = builder.base_url(tg.base_url)
+    if tg.base_file_url:
+        builder = builder.base_file_url(tg.base_file_url)
+    app = builder.build()
     app.add_handler(CommandHandler("start", handle_start))
     app.add_handler(CommandHandler("status", handle_status))
     app.add_handler(CommandHandler("refresh", handle_refresh))
@@ -547,14 +589,27 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(error_handler)
 
-    log.info("Бот запущен (multi-agent). Нажмите Ctrl+C для остановки.")
-    # Рестарт при сетевых ошибках (ConnectTimeout, TimedOut)
+    log.info("Инициализация Telegram-бота… Нажмите Ctrl+C для остановки.")
+    if tg.proxy_url:
+        log.info("Telegram proxy: %s", tg.proxy_url)
+    elif tg.use_env_proxy:
+        log.info("Telegram: используются системные HTTP(S)_PROXY из окружения")
+    # Рестарт при сетевых ошибках (ConnectTimeout, TimedOut, NetworkError)
     while True:
         try:
             app.run_polling(drop_pending_updates=True, close_loop=False)
-        except (TimedOut, TimeoutError) as e:
-            log.warning("Polling error (restart): %s", e)
-            import time
+        except (TimedOut, TimeoutError, NetworkError) as e:
+            log.warning(
+                "polling_network_error (restart через %ss): %s",
+                tg.polling_restart_delay,
+                e,
+                extra={"error_type": type(e).__name__},
+            )
+            if "ConnectError" in str(e):
+                log.warning(
+                    "Нет доступа к api.telegram.org. Включите VPN/прокси или укажите "
+                    "telegram.proxy_url в env.json (например http://127.0.0.1:7890)."
+                )
             time.sleep(tg.polling_restart_delay)
             continue
         break

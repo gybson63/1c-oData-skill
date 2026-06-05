@@ -23,6 +23,7 @@ class RateLimiter:
     async def wait(self) -> None:
         async with self._lock:
             import time
+
             now = time.monotonic()
             elapsed = now - self._last
             if elapsed < self._interval:

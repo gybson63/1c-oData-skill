@@ -13,6 +13,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from bot.agents.odata.analytics_models import AnalyticsPlan
+from bot.messages import Attachment
+
 
 @dataclass
 class ODataQuery:
@@ -77,6 +80,7 @@ class ODataState:
     ai_messages: list[dict[str, Any]] = field(default_factory=list)
     ai_response_content: str = ""
     query: ODataQuery | None = None
+    analytics_plan: AnalyticsPlan | None = None
 
     # -- Промежуточное состояние OData --
     records: list[dict[str, Any]] = field(default_factory=list)
@@ -86,6 +90,9 @@ class ODataState:
     # -- Результат --
     answer_html: str = ""
     error: str | None = None
+    attachments: list[Attachment] = field(default_factory=list)
+    chart_html: str = ""
+    dataframe_summary: str | None = None
 
     # -- Пагинация --
     pagination_ctx: dict[str, Any] | None = None
@@ -116,8 +123,10 @@ class ODataState:
         if assistant_content is not None:
             self.history.append({"role": "assistant", "content": assistant_content})
         elif self.pagination_ctx is not None:
-            self.history.append({
-                "role": "assistant",
-                "content": _json.dumps(self.pagination_ctx, ensure_ascii=False),
-            })
-        return self.history[-(max_turns * 2):]
+            self.history.append(
+                {
+                    "role": "assistant",
+                    "content": _json.dumps(self.pagination_ctx, ensure_ascii=False),
+                }
+            )
+        return self.history[-(max_turns * 2) :]

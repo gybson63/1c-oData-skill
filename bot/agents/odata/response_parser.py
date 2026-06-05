@@ -19,46 +19,59 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 # Поля, которые всегда удаляются из вывода
-SKIP_FIELDS: frozenset[str] = frozenset({
-    "Ref_Key", "DataVersion", "DeletionMark", "Predefined",
-    "PredefinedDataName", "IsFolder",
-})
+SKIP_FIELDS: frozenset[str] = frozenset(
+    {
+        "Ref_Key",
+        "DataVersion",
+        "DeletionMark",
+        "Predefined",
+        "PredefinedDataName",
+        "IsFolder",
+    }
+)
 
 # Поля, которые скрываем из AI-промпта (упоминаются в STEP2_SYSTEM)
-HIDDEN_FIELDS: frozenset[str] = frozenset({
-    "DataVersion", "DeletionMark", "LineNumber",
-    "Predefined", "PredefinedDataName", "IsFolder",
-    "Ref_Key", "_Type",
-})
+HIDDEN_FIELDS: frozenset[str] = frozenset(
+    {
+        "DataVersion",
+        "DeletionMark",
+        "LineNumber",
+        "Predefined",
+        "PredefinedDataName",
+        "IsFolder",
+        "Ref_Key",
+        "_Type",
+    }
+)
 
 
 # ---------------------------------------------------------------------------
 # Разрешение ссылок
 # ---------------------------------------------------------------------------
 
+
 def resolve_references(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Заменить _Key-GUID на представления из раскрытых навигационных свойств.
+    """Заменить _Key-GUID на представления из раскрытых навигационных свойств."""
+    return _resolve_references_impl(records, preserve_unexpanded_keys=False)
 
-    Для каждого поля «Имя_Key» ищет пару «Имя» (dict) и берёт из неё
-    ``Description`` / ``НаименованиеПолное`` / ``Code`` / ``Ref_Key``
-    как представление.  Раскрытые dict-объекты удаляются.
 
-    Args:
-        records: сырые записи из OData-ответа.
+def resolve_references_for_analytics(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Разрешить ссылки для analytics; без $expand сохранить GUID в *_Key."""
+    return _resolve_references_impl(records, preserve_unexpanded_keys=True)
 
-    Returns:
-        Очищенные записи с человекочитаемыми представлениями вместо GUID.
-    """
+
+def _resolve_references_impl(
+    records: list[dict[str, Any]],
+    *,
+    preserve_unexpanded_keys: bool,
+) -> list[dict[str, Any]]:
     resolved: list[dict[str, Any]] = []
 
     for rec in records:
         new_rec: dict[str, Any] = {}
 
         # Собираем ключи навигационных свойств (dict-значения без _Key)
-        nav_keys = {
-            k for k, v in rec.items()
-            if isinstance(v, dict) and not k.endswith("_Key")
-        }
+        nav_keys = {k for k, v in rec.items() if isinstance(v, dict) and not k.endswith("_Key")}
         # Множество ключей для удаления: служебные + раскрытые объекты
         remove_keys = nav_keys | SKIP_FIELDS
 
@@ -66,16 +79,18 @@ def resolve_references(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
             # Пропускаем служебные поля и раскрытые объекты
             if key in remove_keys:
                 continue
+            if "/" in key and not key.endswith("_Key"):
+                base, sub = key.split("/", 1)
+                if sub in ("Description", "Code", "НаименованиеПолное") and value:
+                    new_rec[base] = value
+                continue
             # Заменяем _Key на представление
             if key.endswith("_Key"):
                 base = key[:-4]  # Организация_Key → Организация
                 if base in rec and isinstance(rec[base], dict):
                     obj = rec[base]
                     presentation = (
-                        obj.get("Description")
-                        or obj.get("НаименованиеПолное")
-                        or obj.get("Code")
-                        or obj.get("Ref_Key")
+                        obj.get("Description") or obj.get("НаименованиеПолное") or obj.get("Code") or obj.get("Ref_Key")
                     )
                     if presentation and presentation != obj.get("Ref_Key"):
                         new_rec[base] = presentation
@@ -83,7 +98,8 @@ def resolve_references(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
                         # Нет представления — не показываем
                         continue
                 else:
-                    # Нет раскрытого объекта — не показываем GUID
+                    if preserve_unexpanded_keys:
+                        new_rec[key] = value
                     continue
             else:
                 new_rec[key] = value
@@ -96,6 +112,7 @@ def resolve_references(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 # Предобработка для AI
 # ---------------------------------------------------------------------------
+
 
 def preprocess_for_ai(
     records: list[dict[str, Any]],
@@ -119,6 +136,7 @@ def preprocess_for_ai(
     sample = resolved[:max_records]
 
     import json
+
     data_str = json.dumps(sample, ensure_ascii=False, indent=2)
 
     if len(data_str) > max_data_length:
@@ -130,6 +148,7 @@ def preprocess_for_ai(
 # ---------------------------------------------------------------------------
 # Простая очистка записей
 # ---------------------------------------------------------------------------
+
 
 def preprocess_odata_response(
     data: dict[str, Any] | list[dict[str, Any]],
@@ -157,11 +176,7 @@ def preprocess_odata_response(
 
     cleaned: list[dict[str, Any]] = []
     for record in records:
-        cleaned_record = {
-            k: v
-            for k, v in record.items()
-            if k not in HIDDEN_FIELDS and not k.endswith("_Key")
-        }
+        cleaned_record = {k: v for k, v in record.items() if k not in HIDDEN_FIELDS and not k.endswith("_Key")}
         cleaned.append(cleaned_record)
 
     return cleaned

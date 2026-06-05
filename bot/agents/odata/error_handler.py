@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 
+from bot.messages import AgentProcessResult
 from bot.utils import esc_html
 from bot_lib.exceptions import AIError, AIRateLimitError, ODataError
 
@@ -23,10 +24,10 @@ log = logging.getLogger(__name__)
 
 # Маппинг кодов ошибок OData 1С на человекопонятные сообщения
 _ODATA_ERROR_CODES: dict[str, str] = {
-    "0":  "Параметр не поддерживается (возможна опечатка в имени параметра).",
-    "6":  "Метод не найден — проверьте имя виртуальной таблицы (слитно, без подчёркивания).",
-    "8":  "Тип сущности не найден — проверьте имя объекта (префикс_Имя).",
-    "9":  "Экземпляр сущности не найден — несуществующий GUID или ссылка.",
+    "0": "Параметр не поддерживается (возможна опечатка в имени параметра).",
+    "6": "Метод не найден — проверьте имя виртуальной таблицы (слитно, без подчёркивания).",
+    "8": "Тип сущности не найден — проверьте имя объекта (префикс_Имя).",
+    "9": "Экземпляр сущности не найден — несуществующий GUID или ссылка.",
     "14": "Ошибка разбора $filter — проверьте синтаксис фильтра.",
 }
 
@@ -75,21 +76,15 @@ class ErrorHandler:
         exc: Exception,
         user_text: str,
         history: list[dict[str, str]],
-    ) -> tuple[str, list[dict[str, str]]]:
-        """Обработать исключение и вернуть (answer_html, updated_history).
-
-        Args:
-            exc: перехваченное исключение.
-            user_text: текст сообщения пользователя.
-            history: текущая история диалога.
-
-        Returns:
-            Кортеж (HTML-ответ, обрезанная история).
-        """
+    ) -> AgentProcessResult:
+        """Обработать исключение и вернуть результат агента."""
         answer = self._format_answer(exc)
         history.append({"role": "user", "content": user_text})
         history.append({"role": "assistant", "content": answer})
-        return answer, history[-(self._max_turns * 2):]
+        return AgentProcessResult(
+            text=answer,
+            history=history[-(self._max_turns * 2) :],
+        )
 
     def _format_answer(self, exc: Exception) -> str:
         """Преобразовать исключение в HTML-ответ."""

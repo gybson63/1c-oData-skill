@@ -124,10 +124,7 @@ class ODataConfigInfo:
             odata_url: URL OData для отображения (необязательно).
         """
         url_part = f"OData: {odata_url}" if odata_url else "OData"
-        return (
-            f"{url_part}{self._cache_note} | "
-            f"{self._total_objects} объектов ({self._total_entity_sets} сущностей)"
-        )
+        return f"{url_part}{self._cache_note} | {self._total_objects} объектов ({self._total_entity_sets} сущностей)"
 
     def get_overview(self, odata_url: str = "") -> str:
         """Вернуть краткий обзор — сводная таблица по типам.
@@ -384,30 +381,39 @@ def build_parser() -> argparse.ArgumentParser:
         description="Fetch 1C config info from OData $metadata",
     )
     parser.add_argument(
-        "-EnvFile", default="env.json",
+        "-EnvFile",
+        default="env.json",
         help="Path to env.json with credentials",
     )
     parser.add_argument(
-        "-EnvProfile", default="default",
+        "-EnvProfile",
+        default="default",
         help="Profile name in env.json",
     )
     parser.add_argument(
-        "-ODataUrl", default="",
+        "-ODataUrl",
+        default="",
         help="Override odata_url from env.json",
     )
     parser.add_argument(
-        "-Mode", choices=["overview", "brief", "full"], default="overview",
+        "-Mode",
+        choices=["overview", "brief", "full"],
+        default="overview",
     )
     parser.add_argument(
-        "-CacheDir", default=".cache",
+        "-CacheDir",
+        default=".cache",
         help="Directory for cached metadata",
     )
     parser.add_argument(
-        "-CacheTTL", type=int, default=3600,
+        "-CacheTTL",
+        type=int,
+        default=3600,
         help="Cache TTL in seconds (0 = disable)",
     )
     parser.add_argument(
-        "-ForceRefresh", action="store_true",
+        "-ForceRefresh",
+        action="store_true",
         help="Ignore cache, fetch fresh metadata",
     )
     return parser

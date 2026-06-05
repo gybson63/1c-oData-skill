@@ -62,8 +62,13 @@ class QueryValidator:
 
         # Проверить длину URL
         expand = trim_expand_for_url_limit(
-            self._odata_url, query.entity, query.filter_expr,
-            select, orderby, top, expand,
+            self._odata_url,
+            query.entity,
+            query.filter_expr,
+            select,
+            orderby,
+            top,
+            expand,
             max_url_length=self._max_url_length,
         )
 
@@ -87,7 +92,7 @@ class QueryValidator:
         """Скорректировать $select, оставив только существующие поля."""
         if not select:
             return select
-        raw_select = select[len("$select="):] if select.startswith("$select=") else select
+        raw_select = select[len("$select=") :] if select.startswith("$select=") else select
         valid = [f.strip() for f in raw_select.split(",") if f.strip() in fields]
         result = ",".join(valid) if valid else None
         if result != raw_select:
@@ -99,7 +104,7 @@ class QueryValidator:
         """Скорректировать $orderby, проверив что поле существует."""
         if not orderby:
             return orderby
-        raw_orderby = orderby[len("$orderby="):] if orderby.startswith("$orderby=") else orderby
+        raw_orderby = orderby[len("$orderby=") :] if orderby.startswith("$orderby=") else orderby
         field_name = raw_orderby.split()[0]
         if field_name not in fields:
             log.info("$orderby '%s' не найден в полях, убираем", field_name)

@@ -12,6 +12,9 @@ on:
     branches: [main, develop]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * 1"   # понедельник 03:00 UTC — slow email E2E
 
 # Отменять предыдущие запуски того же PR/branch
 concurrency:
@@ -42,8 +45,11 @@ jobs:
       - name: Ruff check
         run: ruff check .
 
+      - name: Ruff format
+        run: ruff format --check .
+
       - name: Mypy type-check
-        run: mypy bot/ bot_lib/ --ignore-missing-imports
+        run: mypy bot/ bot_lib/ mcp_servers/ --ignore-missing-imports
         continue-on-error: true   # не блокировать PR на начальном этапе
 
   # ===========================================================================
@@ -67,10 +73,10 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          pip install pytest pytest-asyncio pytest-cov respx
+          pip install pytest pytest-asyncio pytest-cov pytest-timeout respx
 
       - name: Run tests with coverage
-        run: pytest --cov=bot --cov=bot_lib --cov-report=xml --cov-report=term-missing
+        run: pytest -m "not slow" --cov=bot --cov=bot_lib --cov-report=xml --cov-report=term-missing
 
       - name: Upload coverage to Codecov
         if: success()
@@ -79,6 +85,90 @@ jobs:
           file: coverage.xml
           token: ${{ secrets.CODECOV_TOKEN }}   # опционально
           fail_ci_if_error: false               # не падать, если нет токена
+
+  # ===========================================================================
+  # Slow tests — email E2E (MailHog/GreenMail + live AI + 1С)
+  # ===========================================================================
+  test-slow:
+    name: Slow tests (email E2E)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    continue-on-error: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio pytest-timeout respx
+
+      - name: Create env.test.json from secrets
+        env:
+          AI_API_KEY: ${{ secrets.AI_API_KEY }}
+          ODATA_URL: ${{ secrets.ODATA_URL }}
+          ODATA_USER: ${{ secrets.ODATA_USER }}
+          ODATA_PASSWORD: ${{ secrets.ODATA_PASSWORD }}
+        run: |
+          cp env.test.example.json env.test.json
+          python - <<'PY'
+          import json, os
+          with open("env.test.json", encoding="utf-8") as f:
+              data = json.load(f)
+          p = data["profiles"]["default"]
+          if os.environ.get("AI_API_KEY"):
+              p["ai_api_key"] = os.environ["AI_API_KEY"]
+          odata = p["agents"]["odata"]
+          if os.environ.get("ODATA_URL"):
+              odata["odata_url"] = os.environ["ODATA_URL"]
+              odata["mcp_servers"]["odata"]["env"]["ODATA_URL"] = os.environ["ODATA_URL"]
+          if os.environ.get("ODATA_USER"):
+              odata["odata_user"] = os.environ["ODATA_USER"]
+              odata["mcp_servers"]["odata"]["env"]["ODATA_USER"] = os.environ["ODATA_USER"]
+          if os.environ.get("ODATA_PASSWORD"):
+              odata["odata_password"] = os.environ["ODATA_PASSWORD"]
+              odata["mcp_servers"]["odata"]["env"]["ODATA_PASSWORD"] = os.environ["ODATA_PASSWORD"]
+          p["email"]["imap_host"] = "localhost"
+          p["email"]["smtp_host"] = "localhost"
+          with open("env.test.json", "w", encoding="utf-8") as f:
+              json.dump(data, f, ensure_ascii=False, indent=2)
+          PY
+
+      - name: Start mail test stack
+        run: docker compose -f docker-compose.test.yml up -d mail
+
+      - name: Wait for GreenMail
+        run: |
+          for i in $(seq 1 30); do
+            nc -z localhost 3025 && nc -z localhost 3143 && exit 0
+            sleep 2
+          done
+          exit 1
+
+      - name: Run slow email E2E tests
+        env:
+          AI_API_KEY: ${{ secrets.AI_API_KEY }}
+          ODATA_URL: ${{ secrets.ODATA_URL }}
+        run: pytest -m "slow" tests/integration/test_email_e2e.py -v --timeout=300
+
+      - name: Upload test artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: email-e2e-artifacts
+          path: tests/artifacts/
+          if-no-files-found: ignore
+
+      - name: Stop mail stack
+        if: always()
+        run: docker compose -f docker-compose.test.yml down
 
   # ===========================================================================
   # Build Docker — проверка сборки образа

@@ -30,8 +30,8 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # Значения по умолчанию (могут быть переопределены через HistorySettings)
-DEFAULT_MAX_MESSAGES = 100   # абсолютный максимум сообщений на чат
-DEFAULT_TRIM_TO = 60         # при достижении MAX — обрезать до этого числа
+DEFAULT_MAX_MESSAGES = 100  # абсолютный максимум сообщений на чат
+DEFAULT_TRIM_TO = 60  # при достижении MAX — обрезать до этого числа
 
 
 class HistoryManager:
@@ -62,6 +62,21 @@ class HistoryManager:
     # Public API
     # ------------------------------------------------------------------
 
+    @property
+    def max_messages(self) -> int:
+        """Абсолютный максимум сообщений на чат."""
+        return self._max
+
+    @property
+    def trim_to(self) -> int:
+        """Количество сообщений, оставляемых при обрезке."""
+        return self._trim_to
+
+    @property
+    def is_persistent(self) -> bool:
+        """Включено ли сохранение истории на диск."""
+        return self._persist_dir is not None
+
     def get(self, chat_id: int) -> list[dict[str, str]]:
         """Получить историю чата.
 
@@ -83,7 +98,9 @@ class HistoryManager:
             history = self._trim(history)
             logger.info(
                 "History trimmed for chat %s: %d → %d messages",
-                chat_id, len(self._histories.get(chat_id, [])), len(history),
+                chat_id,
+                len(self._histories.get(chat_id, [])),
+                len(history),
             )
 
         self._histories[chat_id] = history
@@ -122,7 +139,7 @@ class HistoryManager:
         """Обрезать историю, сохранив system-сообщения + последние N."""
         system_msgs = [m for m in history if m.get("role") == "system"]
         other_msgs = [m for m in history if m.get("role") != "system"]
-        trimmed = system_msgs + other_msgs[-self._trim_to:]
+        trimmed = system_msgs + other_msgs[-self._trim_to :]
         return trimmed
 
     # ------------------------------------------------------------------
@@ -149,7 +166,8 @@ class HistoryManager:
                 msg_count = len(data)
                 logger.info(
                     "Loaded history for chat %s from disk (%d messages)",
-                    chat_id, msg_count,
+                    chat_id,
+                    msg_count,
                 )
                 return data
             logger.warning(

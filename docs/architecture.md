@@ -25,12 +25,19 @@
 ## 1. Общая архитектура
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        Telegram User                            │
-│                    (текстовые запросы)                           │
-└──────────────────────┬──────────────────────────────────────────┘
-                       │
-                       ▼
+┌──────────────────────┐     ┌──────────────────────────────────┐
+│   Telegram User      │     │   Email User (IMAP/SMTP)         │
+│  (текстовые запросы) │     │  bot/email/transport.py          │
+└──────────┬───────────┘     └──────────────┬───────────────────┘
+           │                                │
+           ▼                                ▼
+┌──────────────────────┐     ┌──────────────────────────────────┐
+│   bot/bot.py         │     │   bot/email_bot.py               │
+│   PTB polling        │     │   IMAP poll → handle_inbound     │
+└──────────┬───────────┘     └──────────────┬───────────────────┘
+           │                                │
+           └────────────┬───────────────────┘
+                        ▼
 ┌──────────────────────────────────────────────────────────────────┐
 │                   bot/bot.py — Роутер (thin)                     │
 │  ┌─────────────┐  ┌──────────────┐  ┌────────────────────────┐  │
@@ -45,9 +52,10 @@
 ┌──────────────────────────────────────────────────────────────────┐
 │           bot/chat.py — ChatManager + Chat                       │
 │  ChatManager → get_or_create(chat_id) → Chat                    │
-│    └─ Chat.process_message(text):                                │
-│         Agent.process → Formatter → Truncate → Pagination       │
-│         → ChatResponse(text, reply_markup)                       │
+│    ├─ Chat.process_message(text) — Telegram                      │
+│    │    Agent → Formatter → Truncate → Pagination → ChatResponse │
+│    └─ Chat.process_inbound(InboundMessage) — Email               │
+│         fetch-all pages → prepare_email_response → OutboundMessage│
 └──────────────────────────┬───────────────────────────────────────┘
                            │
                            ▼
@@ -93,7 +101,7 @@
 ```python
 class BaseAgent:
     name: str                           # идентификатор агента
-    
+
     async def initialize(...)           # настройка: AI-клиент, MCP, кэш
     async def shutdown()                # очистка ресурсов
     async def refresh()                 # обновление данных (например, $metadata)
@@ -109,7 +117,7 @@ main() → post_init() → init_agents()
          │   ├─ initialize(): AI client, MCP, $metadata cache
          │   └─ готов к обработке
          └─ FormatterAgent (авто-создаётся если не задан явно)
-             
+
 shutdown() → post_shutdown() → shutdown_agents()
              ├─ agent.shutdown() для каждого
              └─ MCP disconnect_all()
@@ -169,6 +177,20 @@ OData-ответ (JSON) → AI (temperature=0.3) → HTML для Telegram
 - **Более высокая температура** (0.3) — допустима вариативность в формулировках
 - Входные данные: выборка записей (обрезанная до `max_sample_records` и `max_data_length`)
 - Выход: HTML с таблицами, эмодзи, подсветкой
+
+### Analytics-ветка (pandas, join, графики)
+
+Если AI на Шаге 1 возвращает `mode: "analytics"`:
+
+```
+JSON analytics → параллельные OData-запросы → pandas DataFrame
+              → merge / groupby → matplotlib PNG (Telegram) + plotly HTML (email)
+```
+
+- **Без Шага 2** — ответ формируется программно (таблица + caption к графику)
+- **Проактивные графики** — AI может добавить `chart` без явной просьбы пользователя
+- Модули: `bot_lib/dataframe.py`, `analytics_executor.py`, `chart_renderer.py`
+- Лимиты: `max_analytics_records`, `max_analytics_joins`, `chart_max_categories` в `config.py`
 
 ### Почему два шага, а не один?
 
@@ -307,7 +329,7 @@ def _mcp_tool_to_openai(tool):
 ```python
 class MCPClientManager:
     _tool_to_server: dict[str, str]  # tool_name → server_name
-    
+
     async def call_tool(tool_name, arguments):
         server_name = self._tool_to_server[tool_name]
         return await self._servers[server_name].call_tool(...)

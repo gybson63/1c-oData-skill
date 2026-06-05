@@ -1,0 +1,43 @@
+#!/usr/bin/env docker
+# Dockerfile.debug for 1c-oData-skill Telegram Bot
+#
+# Debug build with debugpy for VS Code remote attach debugging.
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.debug.yml up --build
+#
+# The container starts with debugpy waiting for a debugger to attach on port 5678.
+# Set WAIT_FOR_DEBUGGER=true to make the app wait until VS Code connects.
+
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# Install dependencies (layer caching — same as production)
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Install debugpy for remote debugging
+RUN pip install --no-cache-dir debugpy>=1.8.0
+
+# Copy application code
+COPY . .
+
+# Create non-root user for security
+RUN groupadd -r appgroup && useradd -r -g appgroup -d /app -s /sbin/nologin appuser
+
+# Create persistent directories
+RUN mkdir -p .cache logs && chown -R appuser:appgroup .cache logs
+
+USER appuser
+
+# Expose debugpy port
+EXPOSE 5678
+
+# Default: start with debugpy, wait for debugger to attach
+# Override WAIT_FOR_DEBUGGER to false for hot-reload without blocking
+ENV WAIT_FOR_DEBUGGER=true
+
+# Start bot through debugpy
+# --listen 0.0.0.0:5678  — listen on all interfaces
+# --wait-for-client       — block until debugger connects (controlled by env var)
+CMD ["sh", "-c", "if [ \"$WAIT_FOR_DEBUGGER\" = \"true\" ]; then python -m debugpy --listen 0.0.0.0:5678 --wait-for-client -m bot; else python -m debugpy --listen 0.0.0.0:5678 -m bot; fi"]

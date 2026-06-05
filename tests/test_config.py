@@ -107,6 +107,7 @@ class TestLoadSettingsErrors:
         """get_settings() без load_settings() → RuntimeError."""
         # Сбрасываем singleton
         import bot.config as cfg
+
         cfg._settings = None
 
         with pytest.raises(RuntimeError, match="load_settings"):
@@ -175,6 +176,8 @@ class TestModelDefaults:
         assert ai.rpm == 20
         assert ai.temperature == 0.1
         assert ai.temperature_step2 == 0.3
+        assert ai.timeout_retry_count == 2
+        assert ai.timeout_retry_delay == 3
 
     def test_bot_defaults(self):
         bot = BotSettings()

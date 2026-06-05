@@ -416,3 +416,38 @@ fetch(
 
 1С использует OData v3, где вместо `contains(Поле, 'значение')` нужно использовать
 `substringof('значение', Поле) eq true`.
+
+## MCP-инструменты analytics (1c-odata-mcp)
+
+Помимо `fetch`, сервер `mcp_servers/odata_server.py` предоставляет:
+
+### fetch_table
+
+Загрузить таблицу из одной сущности в CSV или JSON:
+
+```
+fetch_table(
+  entity="Catalog_Контрагенты",
+  filter="DeletionMark eq false",
+  select="Description,Code,ИНН",
+  top=200,
+  format="csv"
+)
+```
+
+### analyze_data
+
+Multi-query analytics с join в pandas и опциональным графиком:
+
+```
+analyze_data(
+  queries=[
+    {"alias": "sales", "entity": "Document_Реализация", "filter": "...", "select": "...", "top": 200}
+  ],
+  aggregate={"group_by": ["Контрагент"], "agg": {"СуммаДокумента": "sum"}},
+  chart={"type": "bar", "x": "Контрагент", "y": "СуммаДокумента", "title": "Продажи"},
+  explanation="..."
+)
+```
+
+Ответ JSON: `rows`, `columns`, `csv_preview`, `chart_png_base64`, `chart_html`.

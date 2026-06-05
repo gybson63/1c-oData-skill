@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 
 from bot.metrics import metrics, track_time
 from bot_lib.exceptions import ODataConnectionError, ODataHTTPError
+from bot_lib.http_log import log_http_error, log_http_start, log_http_success
 
 logger = logging.getLogger(__name__)
 
@@ -327,6 +328,7 @@ class ODataClient:
         connection refused). HTTP-ошибки (4xx, 5xx) не повторяются.
         """
         url = self._build_url_with_params(self._base_url, path, params)
+        started_at = log_http_start(service="odata", method=method, url=url, endpoint=path)
         try:
             response = await self._client.request(
                 method,
@@ -335,21 +337,51 @@ class ODataClient:
                 headers=headers,
             )
             response.raise_for_status()
+            log_http_success(
+                service="odata",
+                method=method,
+                url=url,
+                started_at=started_at,
+                status_code=response.status_code,
+                endpoint=path,
+            )
             return response
         except httpx.TimeoutException as exc:
-            raise ODataConnectionError(
-                f"Timeout при запросе {method} {path}: {exc}"
-            ) from exc
+            log_http_error(
+                service="odata",
+                method=method,
+                url=url,
+                error=exc,
+                started_at=started_at,
+                endpoint=path,
+            )
+            raise ODataConnectionError(f"Timeout при запросе {method} {path}: {exc}") from exc
         except httpx.HTTPStatusError as exc:
+            log_http_error(
+                service="odata",
+                method=method,
+                url=url,
+                error=exc,
+                started_at=started_at,
+                endpoint=path,
+                status_code=exc.response.status_code,
+                response_body=exc.response.text[:200],
+            )
             raise ODataHTTPError(
                 message=f"HTTP {exc.response.status_code} для {method} {path}: {exc.response.text[:200]}",
                 status_code=exc.response.status_code,
                 url=str(exc.request.url),
             ) from exc
         except httpx.RequestError as exc:
-            raise ODataConnectionError(
-                f"Ошибка соединения при {method} {path}: {exc}"
-            ) from exc
+            log_http_error(
+                service="odata",
+                method=method,
+                url=url,
+                error=exc,
+                started_at=started_at,
+                endpoint=path,
+            )
+            raise ODataConnectionError(f"Ошибка соединения при {method} {path}: {exc}") from exc
 
     async def _request_json(
         self,
@@ -365,6 +397,4 @@ class ODataClient:
         except Exception as exc:
             from bot_lib.exceptions import ODataParseError
 
-            raise ODataParseError(
-                f"Не удалось разобрать JSON-ответ: {exc}"
-            ) from exc
+            raise ODataParseError(f"Не удалось разобрать JSON-ответ: {exc}") from exc

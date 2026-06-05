@@ -1,0 +1,161 @@
+# Каталог email-сценариев — живая спецификация поведения бота.
+# Статусы: planned | implemented | flaky | blocked
+#
+# Workflow:
+#   1. Новая фича → planned
+#   2. L1/L3 тест → implemented
+#   3. Нестабильный прогон → flaky + issue в backlog
+
+scenarios:
+  - id: email-list-employees
+    layer: e2e
+    question: "Покажи 5 сотрудников из справочника"
+    asserts: [no_error, has_table_or_list, reply_in_thread]
+    status: implemented
+    owner: odata
+    notes: "Базовый список сущностей"
+
+  - id: email-count-employees
+    layer: e2e
+    question: "Сколько записей в справочнике сотрудников?"
+    asserts: [no_error, has_number]
+    status: implemented
+    owner: odata
+    notes: "Count-ветка пайплайна"
+
+  - id: email-unknown-entity
+    layer: e2e
+    question: "Покажи данные из Catalog_НесуществующийОбъект"
+    asserts: [no_stack_trace, polite_error]
+    status: implemented
+    owner: odata
+    notes: "Ошибка OData без traceback"
+
+  - id: email-long-report
+    layer: e2e
+    question: "Покажи 50 сотрудников с полным описанием"
+    asserts: [no_error, has_attachment_or_long_body]
+    status: planned
+    owner: email
+    notes: "Граница inline_max_chars"
+
+  - id: email-thread-followup
+    layer: e2e
+    question: "А теперь только первые 3"
+    asserts: [no_error, reply_in_thread, uses_context]
+    status: implemented
+    owner: email
+    notes: "Второе письмо в цепочке In-Reply-To"
+    thread_setup:
+      first_question: "Покажи 10 сотрудников"
+
+  - id: email-inbound-csv
+    layer: e2e
+    question: "Проанализируй данные из вложения"
+    asserts: [no_error, mentions_attachment]
+    status: planned
+    owner: email
+    notes: "Входящий CSV во вложении"
+    attachment:
+      filename: data.csv
+      content: "name,value\nA,1\nB,2"
+
+  - id: email-analytics-chart
+    layer: e2e
+    question: "Построй график количества документов по месяцам"
+    asserts: [no_error, has_png_attachment]
+    status: planned
+    owner: analytics
+    notes: "Analytics + chart.html"
+
+  - id: email-analytics-thread
+    layer: e2e
+    question: "Измени тип графика на столбчатый"
+    asserts: [no_error, reply_in_thread]
+    status: planned
+    owner: analytics
+    notes: "Уточнение к предыдущему графику"
+    thread_setup:
+      first_question: "Построй график продаж по месяцам"
+
+  - id: email-empty-body
+    layer: e2e
+    question: ""
+    asserts: [polite_response]
+    status: planned
+    owner: email
+    notes: "Пустое письмо"
+
+  - id: email-disallowed-sender
+    layer: e2e
+    question: "Покажи сотрудников"
+    asserts: [no_reply]
+    status: implemented
+    owner: email
+    notes: "Отправитель не в allowed_senders"
+    from_addr: stranger@blocked.test
+
+  - id: chat-short-inline
+    layer: l1
+    question: "mock short"
+    asserts: [inline_body, no_attachment]
+    status: implemented
+    owner: chat
+
+  - id: chat-long-attachment
+    layer: l1
+    question: "mock long"
+    asserts: [has_html_attachment]
+    status: implemented
+    owner: chat
+
+  - id: chat-pagination-fetch-all
+    layer: l1
+    question: "mock pagination"
+    asserts: [fetch_all_called]
+    status: implemented
+    owner: chat
+
+  - id: chat-analytics-attachments
+    layer: l1
+    question: "mock analytics"
+    asserts: [png_and_chart_html]
+    status: implemented
+    owner: chat
+
+  - id: transport-thread-context
+    layer: l2
+    question: "thread"
+    asserts: [context_in_text]
+    status: implemented
+    owner: transport
+
+  - id: transport-smtp-threading
+    layer: l2
+    question: "reply"
+    asserts: [in_reply_to, references]
+    status: implemented
+    owner: transport
+
+  - id: transport-allowlist
+    layer: l2
+    question: "allow"
+    asserts: [sender_filter]
+    status: implemented
+    owner: transport
+
+  - id: email-reference-labels
+    layer: e2e
+    question: "Покажи документы с расшифровкой ссылочных полей"
+    asserts: [no_error, human_readable_labels]
+    status: planned
+    owner: odata
+    notes: "Reference labels в таблице"
+
+  - id: email-max-fetch-cap
+    layer: e2e
+    question: "Выгрузи все записи справочника номенклатуры"
+    asserts: [no_error, respects_max_fetch]
+    status: planned
+    owner: email
+    notes: "Лимит max_fetch_records"

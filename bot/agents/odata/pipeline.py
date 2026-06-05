@@ -25,11 +25,13 @@ from typing import Any
 from openai import BadRequestError
 
 from bot.agents.odata.ai_service import AIService
+from bot.agents.odata.analytics_executor import AnalyticsExecutor
+from bot.agents.odata.chart_renderer import render_html, render_png
 from bot.agents.odata.error_handler import QueryError
 from bot.agents.odata.prompts import ODATA_REFERENCE, STEP1_SYSTEM
 from bot.agents.odata.query_executor import QueryExecutor
 from bot.agents.odata.query_validator import QueryValidator
-from bot.agents.odata.state import ODataQuery, ODataState
+from bot.agents.odata.state import ODataState
 from bot.agents.odata.tool_resolver import (
     AutoSearchResolver,
     InlineJsonResolver,
@@ -37,7 +39,9 @@ from bot.agents.odata.tool_resolver import (
     TextToolCallResolver,
     ToolResolver,
 )
+from bot.messages import Attachment
 from bot.utils import esc_html
+from bot_lib.dataframe import dataframe_preview_html
 
 log = logging.getLogger(__name__)
 
@@ -59,6 +63,9 @@ class ODataPipeline:
         model: str,
         history_max_turns: int = 10,
         default_top: int = 20,
+        max_analytics_records: int = 500,
+        max_analytics_joins: int = 3,
+        chart_max_categories: int = 30,
     ) -> None:
         self._ai = ai
         self._executor = executor
@@ -69,6 +76,9 @@ class ODataPipeline:
         self._model = model
         self._history_max_turns = history_max_turns
         self._default_top = default_top
+        self._max_analytics_records = max_analytics_records
+        self._max_analytics_joins = max_analytics_joins
+        self._chart_max_categories = chart_max_categories
         self._tools_supported: bool = True
 
         # Цепочка резолверов tool calls
@@ -77,11 +87,7 @@ class ODataPipeline:
     def _build_tool_chain(self) -> ToolResolver:
         """Построить цепочку резолверов (Chain of Responsibility)."""
         return NativeFunctionCallResolver(
-            InlineJsonResolver(
-                TextToolCallResolver(
-                    AutoSearchResolver(metadata=self._metadata)
-                )
-            )
+            InlineJsonResolver(TextToolCallResolver(AutoSearchResolver(metadata=self._metadata)))
         )
 
     def build_step1_prompt(self) -> str:
@@ -128,6 +134,10 @@ class ODataPipeline:
         # Шаг 1: AI формирует OData-запрос
         await self._step_build_query(state)
 
+        # Analytics-ветка (multi-query, join, графики)
+        if state.analytics_plan:
+            return await self._step_analytics(state)
+
         # Проверка entity
         if not state.query or not state.query.entity:
             raise QueryError("Не указана сущность (entity) в запросе.")
@@ -166,7 +176,7 @@ class ODataPipeline:
 
         use_tools = state.tools_supported
         try:
-            resp = await self._ai.step1_call_ai(state.ai_messages, use_tools=use_tools)
+            resp = await self._ai.step1_call_ai(state.ai_messages, use_tools=use_tools, chat_id=state.chat_id)
         except BadRequestError as e:
             if use_tools and AIService.is_tool_use_error(e):
                 log.warning("Модель %s не поддерживает tool use, повтор без инструментов", self._model)
@@ -176,41 +186,53 @@ class ODataPipeline:
                 state.ai_messages[0] = {"role": "system", "content": system_prompt}
                 if self._rate_limiter:
                     await self._rate_limiter.wait()
-                resp = await self._ai.step1_call_ai(state.ai_messages, use_tools=False)
+                resp = await self._ai.step1_call_ai(state.ai_messages, use_tools=False, chat_id=state.chat_id)
             else:
                 raise
 
         msg = resp.choices[0].message
-        log.info("STEP1 initial: content=%r, tool_calls=%s",
-                 (msg.content or "")[:200] if msg.content else None,
-                 [tc.function.name for tc in msg.tool_calls] if msg.tool_calls else None)
-
-        # Трекинг AI-ответа с chat_id
-        self._ai.track_ai_response_with_chat(resp, "step1", state.chat_id)
+        log.info(
+            "STEP1 initial: content=%r, tool_calls=%s",
+            (msg.content or "")[:200] if msg.content else None,
+            [tc.function.name for tc in msg.tool_calls] if msg.tool_calls else None,
+        )
 
         # Обработка function calls (до 2 раундов)
         if msg.tool_calls:
-            msg = await self._ai.resolve_tool_calls(state.ai_messages, msg)
-            # Трекинг ответа после tool resolution
+            msg = await self._ai.resolve_tool_calls(state.ai_messages, msg, chat_id=state.chat_id)
+
         state.ai_response_content = msg.content or ""
         log.info("STEP1 final content (len=%d): %s", len(state.ai_response_content), state.ai_response_content[:1000])
 
-        # Попытка извлечь JSON напрямую
+        from bot.agents.odata.query_parser import apply_step1_dict
         from bot.agents.odata.tool_resolver import _extract_json
-        query_dict = _extract_json(state.ai_response_content)
 
-        # Проверка inline tool call
-        if query_dict and self._is_inline_tool_call(query_dict):
-            log.info("Detected inline tool call in JSON, resolving...")
-            # InlineJsonResolver обработает это
-            state.query = None
-        elif query_dict and query_dict.get("entity"):
-            state.query = ODataQuery.from_dict(query_dict)
-            log.info("STEP1 parsed query: %s", json.dumps(query_dict, ensure_ascii=False)[:500])
+        query_dict = _extract_json(state.ai_response_content)
+        if query_dict and apply_step1_dict(state, query_dict):
+            if state.analytics_plan:
+                log.info(
+                    "STEP1 parsed analytics: queries=%d joins=%d chart=%s",
+                    len(state.analytics_plan.queries),
+                    len(state.analytics_plan.joins),
+                    state.analytics_plan.chart.type if state.analytics_plan.chart else None,
+                )
+            elif state.query:
+                log.info(
+                    "STEP1 parsed query: %s",
+                    json.dumps(query_dict, ensure_ascii=False)[:500],
+                )
             return
 
-        # Цепочка резолверов (fallback)
+        # Цепочка резолверов (inline tool call, text tool call, auto-search)
         state.query = await self._tool_chain.resolve(state, self._ai)
+
+        if state.analytics_plan:
+            log.info(
+                "STEP1 resolved analytics via tool chain: queries=%d chart=%s",
+                len(state.analytics_plan.queries),
+                state.analytics_plan.chart.type if state.analytics_plan.chart else None,
+            )
+            return
 
         if not state.query:
             log.warning("Не удалось извлечь JSON из ответа AI. Полный ответ:\n%s", state.ai_response_content)
@@ -219,8 +241,7 @@ class ODataPipeline:
                 f"<pre>{esc_html(state.ai_response_content[:500])}</pre>"
             )
 
-        log.info("STEP1 resolved query: entity=%s filter=%s",
-                 state.query.entity, state.query.filter_expr)
+        log.info("STEP1 resolved query: entity=%s filter=%s", state.query.entity, state.query.filter_expr)
 
     async def _step_validate(self, state: ODataState) -> None:
         """Шаг 2: Валидация OData-запроса по метаданным."""
@@ -231,7 +252,7 @@ class ODataPipeline:
         state.query.orderby = validated["orderby"]
         state.query.top = validated["top"]
         state.query.skip = validated["skip"]
-        # expand храним отдельно в pagination_ctx (не в query)
+        state.query.expand = validated["expand"]
 
     async def _step_execute(self, state: ODataState) -> None:
         """Шаг 3: Выполнение OData-запроса с fallback-стратегиями."""
@@ -244,7 +265,7 @@ class ODataPipeline:
             orderby=q.orderby,
             top=q.top,
             skip=q.skip or None,
-            expand=state.pagination_ctx.get("expand") if state.pagination_ctx else None,
+            expand=q.expand,
         )
         state.records = records
         state.total = total
@@ -262,6 +283,7 @@ class ODataPipeline:
             entity=q.entity,
             shown=shown,
             skip=q.skip or 0,
+            chat_id=state.chat_id,
         )
         state.answer_html = answer
 
@@ -298,16 +320,64 @@ class ODataPipeline:
         )
         return state
 
-    # -- helpers --
+    async def _step_analytics(self, state: ODataState) -> ODataState:
+        """Analytics: multi-query → pandas → таблица и/или график."""
+        assert state.analytics_plan is not None
+        plan = state.analytics_plan
 
-    @staticmethod
-    def _is_inline_tool_call(parsed: dict) -> bool:
-        """Проверить, выглядит ли JSON как встроенный вызов инструмента."""
-        tool_names = frozenset({"odata_reference", "get_entity_fields", "search_entities"})
-        if not isinstance(parsed, dict) or "entity" in parsed:
-            return False
-        tool_name = parsed.get("name") or parsed.get("function")
-        return tool_name in tool_names and isinstance(parsed.get("arguments"), dict)
+        analytics_exec = AnalyticsExecutor(
+            self._executor,
+            metadata=self._metadata,
+            max_records=self._max_analytics_records,
+            max_joins=self._max_analytics_joins,
+        )
+
+        try:
+            result = await analytics_exec.execute(plan, user_query=state.user_text)
+        except (ValueError, KeyError) as e:
+            raise QueryError(f"Ошибка аналитики: {esc_html(str(e))}") from e
+
+        plan = result.plan
+        state.analytics_plan = plan
+        df = result.dataframe
+        chart_title = plan.chart.title if plan.chart and plan.chart.title else "Аналитика"
+        parts = [f"<b>📊 {esc_html(chart_title)}</b>"]
+        if plan.explanation:
+            parts.append(f"<i>{esc_html(plan.explanation)}</i>")
+        parts.append(dataframe_preview_html(df, max_rows=20))
+        state.answer_html = "\n".join(parts)
+        state.dataframe_summary = f"Строк: {len(df)}"
+
+        if plan.chart:
+            try:
+                png_bytes = render_png(
+                    df,
+                    plan.chart,
+                    max_categories=self._chart_max_categories,
+                )
+                state.attachments.append(
+                    Attachment(
+                        filename="chart.png",
+                        content_type="image/png",
+                        data=png_bytes,
+                    )
+                )
+                state.chart_html = render_html(
+                    df,
+                    plan.chart,
+                    max_categories=self._chart_max_categories,
+                )
+            except Exception as e:
+                log.warning("Chart render failed: %s", e)
+                state.answer_html += f"\n\n⚠️ Не удалось построить график: {esc_html(str(e))}"
+
+        ctx = plan.to_history_ctx() | {"total": len(df), "shown": len(df)}
+        state.pagination_ctx = ctx
+        state.history = state.finalize_history(
+            self._history_max_turns,
+            assistant_content=json.dumps(ctx, ensure_ascii=False),
+        )
+        return state
 
     @property
     def tools_supported(self) -> bool:

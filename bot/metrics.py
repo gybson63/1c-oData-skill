@@ -224,9 +224,7 @@ class MetricsRegistry:
         """
         uptime = time.monotonic() - self._start_time
 
-        counters_report = {
-            name: entry.count for name, entry in sorted(self._counters.items())
-        }
+        counters_report = {name: entry.count for name, entry in sorted(self._counters.items())}
 
         timers_report: dict[str, dict[str, Any]] = {}
         for name, entry in sorted(self._timers.items()):
@@ -298,10 +296,7 @@ class MetricsRegistry:
             lines.append("")
             lines.append("⏱ Таймеры:")
             for name, t in r["timers"].items():
-                lines.append(
-                    f"  • {name}: {t['count']} вызовов, "
-                    f"avg={t['avg_s']}с, total={t['total_s']}с"
-                )
+                lines.append(f"  • {name}: {t['count']} вызовов, avg={t['avg_s']}с, total={t['total_s']}с")
 
         # AI Usage
         ai = r["ai_usage"]
@@ -444,7 +439,10 @@ class SessionTokenTracker:
     ) -> None:
         """Записать токены и стоимость для сессии."""
         self._sessions.setdefault(chat_id, SessionTokens()).record(
-            input_tokens, output_tokens, cost_usd=cost_usd, cost_rub=cost_rub,
+            input_tokens,
+            output_tokens,
+            cost_usd=cost_usd,
+            cost_rub=cost_rub,
         )
 
     def get(self, chat_id: int) -> SessionTokens:
@@ -670,8 +668,8 @@ INTERVAL_SECONDS: dict[str, int] = {
 class CostBucket:
     """Агрегированная запись затрат за интервал."""
 
-    interval: str          # "minute", "hour", "day", …
-    bucket_start: str      # ISO timestamp начала интервала
+    interval: str  # "minute", "hour", "day", …
+    bucket_start: str  # ISO timestamp начала интервала
     requests: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
@@ -854,9 +852,16 @@ class CostAnalyzer:
         total_out = sum(b.output_tokens for b in buckets)
 
         interval_ru = {
-            "minute": "минута", "5min": "5 минут", "15min": "15 минут",
-            "30min": "30 минут", "hour": "час", "6h": "6 часов",
-            "12h": "12 часов", "day": "день", "week": "неделя", "month": "месяц",
+            "minute": "минута",
+            "5min": "5 минут",
+            "15min": "15 минут",
+            "30min": "30 минут",
+            "hour": "час",
+            "6h": "6 часов",
+            "12h": "12 часов",
+            "day": "день",
+            "week": "неделя",
+            "month": "месяц",
         }.get(interval, interval)
 
         lines: list[str] = [
@@ -869,10 +874,7 @@ class CostAnalyzer:
 
         lines.append("")
         cost_str = f"${total_cost:.6f}" if total_cost < 0.01 else f"${total_cost:.4f}"
-        lines.append(
-            f"  ═ Итого: {total_req} запросов, "
-            f"IN={total_in}, OUT={total_out}, {cost_str}"
-        )
+        lines.append(f"  ═ Итого: {total_req} запросов, IN={total_in}, OUT={total_out}, {cost_str}")
 
         return "\n".join(lines)
 

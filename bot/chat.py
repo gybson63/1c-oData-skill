@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -22,11 +22,24 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from bot.agents.base import BaseAgent
 from bot.agents.formatter import FormatterAgent
 from bot.config import get_settings
+from bot.email.attachment_builder import prepare_email_response
 from bot.history import HistoryManager
+from bot.messages import (
+    AgentProcessResult,
+    Attachment,
+    InboundMessage,
+    OutboundMessage,
+    TransportChannel,
+    conversation_id_to_chat_id,
+)
 from bot.metrics import session_tokens
 from bot.utils import sanitize_telegram_html
 
 log = logging.getLogger(__name__)
+
+
+class PaginationError(Exception):
+    """Ошибка обработки запроса пагинации, текст которой можно показать пользователю."""
 
 
 # ---------------------------------------------------------------------------
@@ -42,11 +55,13 @@ class ChatResponse:
         text: HTML-ответ, готовый к отправке в Telegram.
         reply_markup: Inline-клавиатура для пагинации (или None).
         raw_answer: Ответ агента до форматирования (для отладки).
+        attachments: Вложения (PNG-графики и т.п.).
     """
 
     text: str
     reply_markup: InlineKeyboardMarkup | None = None
     raw_answer: str = ""
+    attachments: list[Attachment] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -107,6 +122,62 @@ class Chat:
 
     # -- core processing -----------------------------------------------------
 
+    async def process_inbound(self, inbound: InboundMessage) -> OutboundMessage:
+        """Обработка входящего сообщения из любого транспорта."""
+        chat_id = inbound.chat_id
+        user_text = inbound.text
+
+        history = self._history_mgr.get(chat_id)
+
+        agent_result = await self._agent.process_message(
+            user_text,
+            history,
+            chat_id=chat_id,
+        )
+        self.save_history(agent_result.history)
+        raw_answer = agent_result.text
+
+        if agent_result.skip_formatter:
+            answer = agent_result.text
+        else:
+            answer = await self._format(answer=agent_result.text, user_question=user_text, channel=inbound.channel)
+
+        pagination_ctx = self._extract_pagination_context(agent_result.history)
+
+        if inbound.channel == TransportChannel.EMAIL:
+            # Email: без пагинации — загрузить все страницы, если данных больше одной
+            if pagination_ctx and self._has_more_pages(pagination_ctx):
+                full_answer = await self._fetch_all_for_email(
+                    pagination_ctx, user_text, fallback=answer, chat_id=inbound.chat_id
+                )
+                if not agent_result.skip_formatter:
+                    answer = await self._format(full_answer, user_question=user_text, channel=inbound.channel)
+                else:
+                    answer = full_answer
+            return self._finalize_email(
+                answer,
+                inbound,
+                raw_answer=raw_answer,
+                agent_result=agent_result,
+            )
+
+        if pagination_ctx:
+            self.save_pagination_state(pagination_ctx)
+
+        chat_response = self._finalize(
+            answer,
+            pagination_ctx,
+            raw_answer=raw_answer,
+            attachments=agent_result.attachments,
+        )
+        return OutboundMessage(
+            text=chat_response.text,
+            channel=TransportChannel.TELEGRAM,
+            format="html",
+            attachments=chat_response.attachments,
+            metadata={"reply_markup": chat_response.reply_markup},
+        )
+
     async def process_message(self, user_text: str) -> ChatResponse:
         """Полный пайплайн обработки сообщения.
 
@@ -128,49 +199,189 @@ class Chat:
         history = self.history
 
         # Шаг 1: обработка агентом
-        answer, updated_history = await self._agent.process_message(
-            user_text, history, chat_id=self.chat_id,
+        agent_result = await self._agent.process_message(
+            user_text,
+            history,
+            chat_id=self.chat_id,
         )
 
         # Сохранить историю
-        self.save_history(updated_history)
+        self.save_history(agent_result.history)
 
-        raw_answer = answer
+        raw_answer = agent_result.text
 
         # Шаг 2: форматирование через FormatterAgent
+        if agent_result.skip_formatter:
+            answer = agent_result.text
+        else:
+            answer = await self._format(agent_result.text, user_question=user_text)
+
+        # Шаг 3: пагинация — извлечь и сохранить контекст
+        pagination_ctx = self._extract_pagination_context(agent_result.history)
+        if pagination_ctx:
+            self.save_pagination_state(pagination_ctx)
+
+        # Шаг 4: токены + обрезка + санитизация + клавиатура
+        return self._finalize(
+            answer,
+            pagination_ctx,
+            raw_answer=raw_answer,
+            attachments=agent_result.attachments,
+        )
+
+    async def process_pagination(self, skip: int) -> ChatResponse:
+        """Пайплайн обработки запроса следующей страницы (callback пагинации).
+
+        Использует сохранённый контекст пагинации, выполняет запрос с новым
+        ``skip`` через OData-агент, форматирует и финализирует ответ — той же
+        цепочкой, что и :meth:`process_message`.
+
+        Raises:
+            PaginationError: контекст потерян или агент недоступен (текст
+                ошибки можно показать пользователю).
+        """
+        ctx = self._pagination_ctx
+        if not ctx:
+            raise PaginationError("Контекст запроса потерян. Повторите запрос.")
+
+        agent = self._agent
+        if not hasattr(agent, "execute_page_with_ctx"):
+            raise PaginationError("Агент OData не доступен.")
+
+        answer, new_ctx = await agent.execute_page_with_ctx(ctx, skip, chat_id=self.chat_id)
+
+        # Обновить контекст пагинации (None — если страниц больше нет)
+        if new_ctx:
+            self.save_pagination_state(new_ctx)
+
+        answer = await self._format(answer, user_question="продолжение")
+        return self._finalize(answer, new_ctx)
+
+    # -- pipeline helpers ----------------------------------------------------
+
+    async def _format(
+        self,
+        answer: str,
+        user_question: str,
+        channel: TransportChannel = TransportChannel.TELEGRAM,
+    ) -> str:
+        """Форматировать ответ через FormatterAgent (с graceful fallback)."""
         if self._formatter and self._formatter.is_initialized:
             try:
-                answer = await self._formatter.format_response(
-                    answer, user_question=user_text, chat_id=self.chat_id,
+                return await self._formatter.format_response(
+                    answer,
+                    user_question=user_question,
+                    chat_id=self.chat_id,
+                    channel=channel.value,
                 )
             except Exception as e:
                 log.warning("FormatterAgent: ошибка форматирования (%s), отправляю как есть", e)
+        return answer
 
-        # Шаг 3: подпись с токенами сессии
+    def _finalize_email(
+        self,
+        answer: str,
+        inbound: InboundMessage,
+        raw_answer: str = "",
+        agent_result: AgentProcessResult | None = None,
+    ) -> OutboundMessage:
+        """Финализация ответа для email: при превышении лимита — вложение."""
+        settings = get_settings().email
+
+        st = session_tokens.get(self.chat_id)
+        token_footer = st.format_compact() if st.requests > 0 else ""
+
+        subject = inbound.metadata.get("subject", "")
+        body, attachments = prepare_email_response(
+            answer,
+            settings,
+            subject=subject,
+            token_footer=token_footer,
+        )
+
+        if agent_result:
+            attachments.extend(agent_result.attachments)
+            if agent_result.chart_html:
+                from bot.messages import Attachment
+
+                attachments.append(
+                    Attachment(
+                        filename="chart.html",
+                        content_type="text/html",
+                        data=agent_result.chart_html.encode("utf-8"),
+                    )
+                )
+
+        return OutboundMessage(
+            text=body,
+            channel=TransportChannel.EMAIL,
+            format="html",
+            subject=subject,
+            attachments=attachments,
+            metadata={"token_footer": token_footer, "raw_answer": raw_answer},
+        )
+
+    @staticmethod
+    def _has_more_pages(pagination_ctx: dict) -> bool:
+        total = pagination_ctx.get("total", 0)
+        skip = pagination_ctx.get("skip", 0)
+        shown = pagination_ctx.get("shown", 0)
+        return total > skip + shown
+
+    async def _fetch_all_for_email(
+        self,
+        pagination_ctx: dict,
+        user_text: str,
+        *,
+        fallback: str,
+        chat_id: int,
+    ) -> str:
+        """Загрузить все страницы OData для email-ответа."""
+        agent = self._agent
+        if not hasattr(agent, "execute_all_pages_with_ctx"):
+            return fallback
+
+        settings = get_settings()
+        try:
+            return await agent.execute_all_pages_with_ctx(
+                pagination_ctx,
+                user_text,
+                chat_id=chat_id,
+                max_records=settings.email.max_fetch_records,
+            )
+        except Exception as e:
+            log.warning("Email fetch-all failed: %s", e)
+            return f"{fallback}\n\n⚠️ Не удалось загрузить все записи: {e}"
+
+    def _finalize(
+        self,
+        answer: str,
+        pagination_ctx: dict | None,
+        raw_answer: str = "",
+        attachments: list | None = None,
+    ) -> ChatResponse:
+        """Финальные шаги пайплайна: подпись с токенами, обрезка, санитизация, клавиатура."""
+        # Подпись с токенами сессии
         st = session_tokens.get(self.chat_id)
         if st.requests > 0:
             answer += f"\n\n<i>{st.format_compact()}</i>"
 
-        # Шаг 4: обрезка (Telegram limit)
-        settings = get_settings()
-        max_len = settings.telegram.message_max_length
-        if len(answer) > max_len:
-            answer = answer[:max_len] + "... (сообщение сокращено)"
+        # Обрезка под лимит Telegram (caption для photo — 1024, для текста — message_max_length)
+        max_len = get_settings().telegram.message_max_length
+        has_photo = any(getattr(a, "content_type", "").startswith("image/") for a in (attachments or []))
+        effective_max = 1024 if has_photo else max_len
+        if len(answer) > effective_max:
+            answer = answer[:effective_max] + "... (сообщение сокращено)"
 
-        # Шаг 5: санитизация HTML
+        # Санитизация HTML и построение клавиатуры пагинации
         safe_answer = sanitize_telegram_html(answer)
-
-        # Шаг 6: пагинация
-        reply_markup = None
-        pagination_ctx = self._extract_pagination_context(updated_history)
-        if pagination_ctx:
-            self.save_pagination_state(pagination_ctx)
-            reply_markup = self._build_pagination_keyboard(pagination_ctx)
+        reply_markup = self._build_pagination_keyboard(pagination_ctx)
 
         return ChatResponse(
             text=safe_answer,
             reply_markup=reply_markup,
             raw_answer=raw_answer,
+            attachments=list(attachments or []),
         )
 
     # -- pagination helpers (перенесены из bot.py) ---------------------------
@@ -185,7 +396,7 @@ class Chat:
                 content = msg.get("content", "")
                 try:
                     data = json.loads(content)
-                    if isinstance(data, dict) and "entity" in data:
+                    if isinstance(data, dict) and ("entity" in data or data.get("mode") == "analytics"):
                         return data
                 except (json.JSONDecodeError, TypeError):
                     pass
@@ -197,15 +408,19 @@ class Chat:
         """Построить inline-клавиатуру для пагинации."""
         if not pagination_ctx:
             return None
+        if pagination_ctx.get("mode") == "analytics":
+            return None
         total = pagination_ctx.get("total", 0)
         skip = pagination_ctx.get("skip", 0)
         shown = pagination_ctx.get("shown", 0)
         if skip + shown < total:
             top = pagination_ctx.get("top", 20)
             next_skip = skip + top
-            return InlineKeyboardMarkup([
-                [InlineKeyboardButton("➡️ Следующие", callback_data=f"page:{next_skip}")],
-            ])
+            return InlineKeyboardMarkup(
+                [
+                    [InlineKeyboardButton("➡️ Следующие", callback_data=f"page:{next_skip}")],
+                ]
+            )
         return None
 
     # -- cleanup -------------------------------------------------------------
@@ -250,8 +465,10 @@ class ChatManager:
         self._history_mgr = history_mgr
         self._chats: dict[int, Chat] = {}
 
-    def get_or_create(self, chat_id: int) -> Chat:
-        """Получить или создать чат по chat_id."""
+    def get_or_create(self, chat_id: int | str) -> Chat:
+        """Получить или создать чат по chat_id (int для Telegram, str conversation_id для email)."""
+        if isinstance(chat_id, str):
+            chat_id = conversation_id_to_chat_id(chat_id)
         if chat_id not in self._chats:
             agent = self._default_agent()
             if not agent:

@@ -54,6 +54,9 @@ class ODataQuerySettings(BaseModel):
     max_sample_records: int = Field(default=30, description="Максимальное число записей для AI")
     max_data_length: int = Field(default=8000, description="Максимальная длина данных для AI")
     metadata_cache_seconds: int = Field(default=86400, description="TTL кэша метаданных, сек")
+    max_analytics_records: int = Field(default=500, description="Лимит строк на sub-query в analytics")
+    max_analytics_joins: int = Field(default=3, description="Максимум join-ов в analytics")
+    chart_max_categories: int = Field(default=30, description="Максимум категорий на bar/pie графике")
 
 
 class AISettings(BaseModel):
@@ -65,6 +68,8 @@ class AISettings(BaseModel):
     rpm: int = Field(default=20, description="Запросов в минуту (rate limit)")
     temperature: float = Field(default=0.1, description="Температура для Шага 1")
     temperature_step2: float = Field(default=0.3, description="Температура для Шага 2")
+    timeout_retry_count: int = Field(default=2, description="Повторы при таймауте AI (доп. попытки)")
+    timeout_retry_delay: int = Field(default=3, description="Пауза перед повтором при таймауте AI, сек")
 
 
 class BotSettings(BaseModel):
@@ -83,6 +88,22 @@ class TelegramTransportSettings(BaseModel):
     retry_count: int = Field(default=2, description="Количество ретраев при отправке")
     retry_delay: int = Field(default=2, description="Задержка между ретраями, сек")
     polling_restart_delay: int = Field(default=5, description="Задержка рестарта polling, сек")
+    proxy_url: str | None = Field(
+        default=None,
+        description="HTTP/SOCKS5 прокси для api.telegram.org, например http://127.0.0.1:7890",
+    )
+    use_env_proxy: bool = Field(
+        default=True,
+        description="Использовать переменные окружения HTTP(S)_PROXY (httpx trust_env)",
+    )
+    base_url: str | None = Field(
+        default=None,
+        description="Кастомный Bot API URL (локальный сервер Telegram Bot API)",
+    )
+    base_file_url: str | None = Field(
+        default=None,
+        description="Кастомный URL для файлов Telegram Bot API",
+    )
 
 
 class FormatterSettings(BaseModel):
@@ -130,6 +151,51 @@ class PricingSettings(BaseModel):
         return self.input_per_1m, self.output_per_1m
 
 
+class EmailSettings(BaseModel):
+    """Настройки email-транспорта (IMAP/SMTP)."""
+
+    enabled: bool = Field(default=False, description="Включить email-транспорт")
+    imap_host: str = Field(default="", description="IMAP-сервер")
+    imap_port: int = Field(default=993, description="IMAP-порт")
+    imap_user: str = Field(default="", description="IMAP-логин")
+    imap_password: str = Field(default="", description="IMAP-пароль")
+    imap_folder: str = Field(default="INBOX", description="Папка для чтения")
+    imap_use_ssl: bool = Field(default=True, description="IMAP через SSL")
+    smtp_host: str = Field(default="", description="SMTP-сервер")
+    smtp_port: int = Field(default=587, description="SMTP-порт")
+    smtp_user: str = Field(default="", description="SMTP-логин")
+    smtp_password: str = Field(default="", description="SMTP-пароль")
+    smtp_use_ssl: bool = Field(default=False, description="SMTP через SSL (порт 465)")
+    smtp_use_tls: bool = Field(default=True, description="SMTP STARTTLS (порт 587)")
+    from_address: str = Field(default="", description="Адрес отправителя (From)")
+    from_name: str = Field(default="1С OData Bot", description="Имя отправителя")
+    message_id_domain: str = Field(default="odata-bot.local", description="Домен для Message-ID")
+    poll_interval: int = Field(default=30, description="Интервал опроса IMAP, сек")
+    allowed_senders: list[str] = Field(
+        default_factory=list,
+        description="Разрешённые отправители (пусто = все)",
+    )
+    context_max_chars: int = Field(default=12000, description="Макс. символов контекста цепочки")
+    context_message_max_chars: int = Field(default=3000, description="Макс. символов одного письма")
+    context_keep_recent: int = Field(default=3, description="Последние N писем — полностью")
+    context_keep_first: bool = Field(default=True, description="Первое письмо — всегда полностью")
+    context_middle_summary_chars: int = Field(default=300, description="Сжатие средних писем до N символов")
+    inline_max_chars: int = Field(
+        default=8000,
+        description="Макс. символов ответа в теле письма; при превышении — вложение",
+    )
+    inline_preview_chars: int = Field(default=500, description="Символов превью в теле при отправке вложения")
+    attachment_filename: str = Field(
+        default="",
+        description="Имя файла вложения (пусто = автогенерация из темы)",
+    )
+    attachment_format: str = Field(default="html", description="Формат вложения: html")
+    max_fetch_records: int = Field(
+        default=500,
+        description="Макс. записей OData при автозагрузке всех страниц для email",
+    )
+
+
 class HistorySettings(BaseModel):
     """Настройки управления историей диалогов."""
 
@@ -152,13 +218,16 @@ class AppSettings(BaseModel):
     odata_query: ODataQuerySettings = Field(default_factory=ODataQuerySettings)
     formatter: FormatterSettings = Field(default_factory=FormatterSettings)
     history: HistorySettings = Field(default_factory=HistorySettings)
+    email: EmailSettings = Field(default_factory=EmailSettings)
     ai_pricing: PricingSettings = Field(default_factory=PricingSettings)
 
     # Общие настройки
     cache_dir: str = Field(default=".cache", description="Директория для кэша")
     log_level: str = Field(default="INFO", description="Уровень логирования")
     log_file: str | None = Field(default=None, description="Путь к файлу лога")
-    history_max_turns: int = Field(default=10, description="Максимальное число пар в истории (legacy, используйте history.max_turns)")
+    history_max_turns: int = Field(
+        default=10, description="Максимальное число пар в истории (legacy, используйте history.max_turns)"
+    )
 
     # Agents config (сырой dict — для передачи в BaseAgent.initialize)
     agents_config: dict[str, dict[str, Any]] = Field(
@@ -187,9 +256,7 @@ def get_settings() -> AppSettings:
         RuntimeError: если load_settings() ещё не вызывался.
     """
     if _settings is None:
-        raise RuntimeError(
-            "Settings not loaded. Call load_settings() first."
-        )
+        raise RuntimeError("Settings not loaded. Call load_settings() first.")
     return _settings
 
 
@@ -278,6 +345,8 @@ def _build_settings(p: dict[str, Any]) -> AppSettings:
         rpm=p.get("ai_rpm", 20),
         temperature=p.get("ai_temperature", 0.1),
         temperature_step2=p.get("ai_temperature_step2", 0.3),
+        timeout_retry_count=p.get("ai_timeout_retry_count", 2),
+        timeout_retry_delay=p.get("ai_timeout_retry_delay", 3),
     )
 
     # --- Bot ---
@@ -295,6 +364,10 @@ def _build_settings(p: dict[str, Any]) -> AppSettings:
         retry_count=tg_raw.get("retry_count", 2),
         retry_delay=tg_raw.get("retry_delay", 2),
         polling_restart_delay=tg_raw.get("polling_restart_delay", 5),
+        proxy_url=tg_raw.get("proxy_url"),
+        use_env_proxy=tg_raw.get("use_env_proxy", True),
+        base_url=tg_raw.get("base_url"),
+        base_file_url=tg_raw.get("base_file_url"),
     )
 
     # --- OData query limits ---
@@ -308,6 +381,9 @@ def _build_settings(p: dict[str, Any]) -> AppSettings:
         max_sample_records=odata_raw.get("max_sample_records", 30),
         max_data_length=odata_raw.get("max_data_length", 8000),
         metadata_cache_seconds=odata_raw.get("metadata_cache_seconds", 86400),
+        max_analytics_records=odata_raw.get("max_analytics_records", 500),
+        max_analytics_joins=odata_raw.get("max_analytics_joins", 3),
+        chart_max_categories=odata_raw.get("chart_max_categories", 30),
     )
 
     # --- Formatter ---
@@ -316,6 +392,39 @@ def _build_settings(p: dict[str, Any]) -> AppSettings:
         enabled=fmt_raw.get("enabled", True),
         formatter_model=fmt_raw.get("formatter_model", "gpt-4o-mini"),
         temperature=fmt_raw.get("temperature", 0.2),
+    )
+
+    # --- Email ---
+    email_raw = p.get("email", {})
+    email = EmailSettings(
+        enabled=email_raw.get("enabled", False),
+        imap_host=email_raw.get("imap_host", ""),
+        imap_port=email_raw.get("imap_port", 993),
+        imap_user=email_raw.get("imap_user", ""),
+        imap_password=email_raw.get("imap_password", ""),
+        imap_folder=email_raw.get("imap_folder", "INBOX"),
+        imap_use_ssl=email_raw.get("imap_use_ssl", True),
+        smtp_host=email_raw.get("smtp_host", ""),
+        smtp_port=email_raw.get("smtp_port", 587),
+        smtp_user=email_raw.get("smtp_user", ""),
+        smtp_password=email_raw.get("smtp_password", ""),
+        smtp_use_ssl=email_raw.get("smtp_use_ssl", False),
+        smtp_use_tls=email_raw.get("smtp_use_tls", True),
+        from_address=email_raw.get("from_address", ""),
+        from_name=email_raw.get("from_name", "1С OData Bot"),
+        message_id_domain=email_raw.get("message_id_domain", "odata-bot.local"),
+        poll_interval=email_raw.get("poll_interval", 30),
+        allowed_senders=email_raw.get("allowed_senders", []),
+        context_max_chars=email_raw.get("context_max_chars", 12000),
+        context_message_max_chars=email_raw.get("context_message_max_chars", 3000),
+        context_keep_recent=email_raw.get("context_keep_recent", 3),
+        context_keep_first=email_raw.get("context_keep_first", True),
+        context_middle_summary_chars=email_raw.get("context_middle_summary_chars", 300),
+        inline_max_chars=email_raw.get("inline_max_chars", 8000),
+        inline_preview_chars=email_raw.get("inline_preview_chars", 500),
+        attachment_filename=email_raw.get("attachment_filename", ""),
+        attachment_format=email_raw.get("attachment_format", "html"),
+        max_fetch_records=email_raw.get("max_fetch_records", 500),
     )
 
     # --- History ---
@@ -355,6 +464,7 @@ def _build_settings(p: dict[str, Any]) -> AppSettings:
         odata_query=odata_query,
         formatter=formatter,
         history=history,
+        email=email,
         ai_pricing=ai_pricing,
         cache_dir=p.get("cache_dir", ".cache"),
         log_level=p.get("log_level", "INFO"),

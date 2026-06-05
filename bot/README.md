@@ -124,6 +124,10 @@ bot/
 python -m bot --log-level DEBUG
 ```
 
+HTTP-запросы (Telegram, OData, AI) логируются в канал `1c-bot.http`:
+- **ERROR** — `http_request_failed` с `service`, `method`, `url` (с маскировкой токенов), `endpoint`, `error_type`, `elapsed_ms`
+- **DEBUG** — `http_request_start` / `http_request_ok` для трассировки всех исходящих запросов
+
 ### Метрики (`bot/metrics.py`)
 
 In-memory реестр метрик для мониторинга работы бота:

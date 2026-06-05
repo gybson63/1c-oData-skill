@@ -62,12 +62,28 @@ class QueryExecutor:
 
         # Fallback 1: убрать дату из фильтра
         records, total = await self._fallback_date_filter(
-            records, total, entity, filter_expr, select, orderby, top, skip, expand,
+            records,
+            total,
+            entity,
+            filter_expr,
+            select,
+            orderby,
+            top,
+            skip,
+            expand,
         )
 
         # Fallback 2: substringof
         records, total = await self._fallback_substringof(
-            records, total, entity, filter_expr, select, orderby, top, skip, expand,
+            records,
+            total,
+            entity,
+            filter_expr,
+            select,
+            orderby,
+            top,
+            skip,
+            expand,
         )
 
         return records, total
@@ -128,7 +144,8 @@ class QueryExecutor:
 
         fallback_filter = re.sub(
             r"\s*and\s+\w+\s+(eq|ge|le|gt|lt)\s+datetime'[^']*'",
-            "", filter_expr,
+            "",
+            filter_expr,
         )
         if fallback_filter == filter_expr:
             return records, total
@@ -165,7 +182,7 @@ class QueryExecutor:
             return records, total
 
         num = number_match.group(1)
-        digits = re.sub(r'^[^\d]+', '', num)
+        digits = re.sub(r"^[^\d]+", "", num)
         if not digits or digits == num:
             return records, total
 

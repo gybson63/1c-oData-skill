@@ -94,6 +94,7 @@ class TestTimers:
 
     def test_avg_time_zero_count(self):
         from bot.metrics import TimerEntry
+
         entry = TimerEntry()
         assert entry.avg_time == 0.0
 
@@ -245,6 +246,7 @@ class TestTrackTime:
     @pytest.mark.asyncio
     async def test_track_time_async(self, registry):
         import asyncio
+
         # Use the global metrics singleton (reset first)
         reset_metrics()
         async with track_time("test_async"):
@@ -365,12 +367,16 @@ class TestCostLogger:
         logger = CostLogger(str(cost_dir))
 
         logger.log(
-            model="gpt-4o-mini", input_tokens=100, output_tokens=50,
+            model="gpt-4o-mini",
+            input_tokens=100,
+            output_tokens=50,
             cost_usd=0.000045,
             ts=datetime(2026, 5, 3, 23, 59, 0, tzinfo=UTC),
         )
         logger.log(
-            model="gpt-4o-mini", input_tokens=100, output_tokens=50,
+            model="gpt-4o-mini",
+            input_tokens=100,
+            output_tokens=50,
             cost_usd=0.000045,
             ts=datetime(2026, 5, 4, 0, 1, 0, tzinfo=UTC),
         )
@@ -383,10 +389,10 @@ class TestCostLogger:
         logger = CostLogger(str(cost_dir))
 
         base_ts = datetime(2026, 5, 4, 12, 0, 0, tzinfo=UTC)
-        logger.log(model="gpt-4o-mini", input_tokens=100, output_tokens=50,
-                    cost_usd=0.000045, ts=base_ts)
-        logger.log(model="gpt-4o", input_tokens=200, output_tokens=100,
-                    cost_usd=0.00009, ts=base_ts + timedelta(hours=1))
+        logger.log(model="gpt-4o-mini", input_tokens=100, output_tokens=50, cost_usd=0.000045, ts=base_ts)
+        logger.log(
+            model="gpt-4o", input_tokens=200, output_tokens=100, cost_usd=0.00009, ts=base_ts + timedelta(hours=1)
+        )
 
         records = logger.read_all()
         assert len(records) == 2
@@ -412,12 +418,13 @@ class TestCostAnalyzer:
 
         base = datetime(2026, 5, 4, 0, 0, 0, tzinfo=UTC)
         # 3 записи в один день
-        logger.log(model="gpt-4o-mini", input_tokens=100, output_tokens=50,
-                    cost_usd=0.000045, ts=base + timedelta(hours=2))
-        logger.log(model="gpt-4o-mini", input_tokens=200, output_tokens=100,
-                    cost_usd=0.00009, ts=base + timedelta(hours=5))
-        logger.log(model="gpt-4o", input_tokens=500, output_tokens=250,
-                    cost_usd=0.001, ts=base + timedelta(hours=14))
+        logger.log(
+            model="gpt-4o-mini", input_tokens=100, output_tokens=50, cost_usd=0.000045, ts=base + timedelta(hours=2)
+        )
+        logger.log(
+            model="gpt-4o-mini", input_tokens=200, output_tokens=100, cost_usd=0.00009, ts=base + timedelta(hours=5)
+        )
+        logger.log(model="gpt-4o", input_tokens=500, output_tokens=250, cost_usd=0.001, ts=base + timedelta(hours=14))
         return str(cost_dir)
 
     def test_aggregate_by_day(self, tmp_path):
@@ -715,21 +722,18 @@ class TestSessionTokenTracker:
         assert "500" in text
 
     def test_record_with_cost(self, tracker):
-        tracker.record(chat_id=123, input_tokens=100, output_tokens=50,
-                        cost_usd=0.000045, cost_rub=0.005)
+        tracker.record(chat_id=123, input_tokens=100, output_tokens=50, cost_usd=0.000045, cost_rub=0.005)
         st = tracker.get(123)
         assert st.cost_usd == pytest.approx(0.000045, abs=1e-8)
         assert st.cost_rub == pytest.approx(0.005, abs=1e-6)
 
     def test_get_compact_with_cost_rub(self, tracker):
-        tracker.record(chat_id=123, input_tokens=1000, output_tokens=500,
-                        cost_rub=2.50)
+        tracker.record(chat_id=123, input_tokens=1000, output_tokens=500, cost_rub=2.50)
         text = tracker.get_compact(123)
         assert "💰₽2.50" in text
 
     def test_format_session_report_with_cost(self, tracker):
-        tracker.record(chat_id=123, input_tokens=1000, output_tokens=500,
-                        cost_usd=0.05, cost_rub=4.50)
+        tracker.record(chat_id=123, input_tokens=1000, output_tokens=500, cost_usd=0.05, cost_rub=4.50)
         text = tracker.format_session_report(123)
         assert "Стоимость:" in text
         assert "$0.0500" in text

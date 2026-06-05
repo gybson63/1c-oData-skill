@@ -78,7 +78,9 @@ class TestGetSessionId:
 class TestRotatingSessionFileHandler:
     def test_creates_file_on_init(self, tmp_log_dir):
         handler = RotatingSessionFileHandler(
-            log_dir=tmp_log_dir, session_id="test1", rotate_seconds=9999,
+            log_dir=tmp_log_dir,
+            session_id="test1",
+            rotate_seconds=9999,
         )
         try:
             assert handler.current_path != ""
@@ -89,11 +91,19 @@ class TestRotatingSessionFileHandler:
 
     def test_writes_log_record(self, tmp_log_dir):
         handler = RotatingSessionFileHandler(
-            log_dir=tmp_log_dir, session_id="test2", rotate_seconds=9999,
+            log_dir=tmp_log_dir,
+            session_id="test2",
+            rotate_seconds=9999,
         )
         try:
             record = logging.LogRecord(
-                "test", logging.INFO, "", 0, "hello world", (), None,
+                "test",
+                logging.INFO,
+                "",
+                0,
+                "hello world",
+                (),
+                None,
             )
             handler.emit(record)
 
@@ -105,7 +115,9 @@ class TestRotatingSessionFileHandler:
 
     def test_rotation_creates_new_file(self, tmp_log_dir):
         handler = RotatingSessionFileHandler(
-            log_dir=tmp_log_dir, session_id="test3", rotate_seconds=9999,
+            log_dir=tmp_log_dir,
+            session_id="test3",
+            rotate_seconds=9999,
         )
         try:
             first_path = handler.current_path

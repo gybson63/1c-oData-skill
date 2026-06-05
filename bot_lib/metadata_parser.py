@@ -30,23 +30,25 @@ EDM_NAMESPACES = [
 # Типы объектов 1С — префиксы → тип и русские названия
 # ---------------------------------------------------------------------------
 
-PREFIX_TO_TYPE: OrderedDict[str, str] = OrderedDict([
-    ("Catalog_", "Catalog"),
-    ("Document_", "Document"),
-    ("InformationRegister_", "InformationRegister"),
-    ("AccumulationRegister_", "AccumulationRegister"),
-    ("AccountingRegister_", "AccountingRegister"),
-    ("CalculationRegister_", "CalculationRegister"),
-    ("ChartOfCharacteristicTypes_", "ChartOfCharacteristicTypes"),
-    ("ChartOfAccounts_", "ChartOfAccounts"),
-    ("ChartOfCalculationTypes_", "ChartOfCalculationTypes"),
-    ("Enum_", "Enum"),
-    ("BusinessProcess_", "BusinessProcess"),
-    ("Task_", "Task"),
-    ("ExchangePlan_", "ExchangePlan"),
-    ("Sequence_", "Sequence"),
-    ("DocumentJournal_", "DocumentJournal"),
-])
+PREFIX_TO_TYPE: OrderedDict[str, str] = OrderedDict(
+    [
+        ("Catalog_", "Catalog"),
+        ("Document_", "Document"),
+        ("InformationRegister_", "InformationRegister"),
+        ("AccumulationRegister_", "AccumulationRegister"),
+        ("AccountingRegister_", "AccountingRegister"),
+        ("CalculationRegister_", "CalculationRegister"),
+        ("ChartOfCharacteristicTypes_", "ChartOfCharacteristicTypes"),
+        ("ChartOfAccounts_", "ChartOfAccounts"),
+        ("ChartOfCalculationTypes_", "ChartOfCalculationTypes"),
+        ("Enum_", "Enum"),
+        ("BusinessProcess_", "BusinessProcess"),
+        ("Task_", "Task"),
+        ("ExchangePlan_", "ExchangePlan"),
+        ("Sequence_", "Sequence"),
+        ("DocumentJournal_", "DocumentJournal"),
+    ]
+)
 
 TYPE_RU: dict[str, str] = {
     "Catalog": "Справочники",
@@ -72,6 +74,7 @@ TYPE_ORDER: list[str] = list(PREFIX_TO_TYPE.values())
 # ---------------------------------------------------------------------------
 # XML helpers — namespace-agnostic find
 # ---------------------------------------------------------------------------
+
 
 def find_ns(elem: ET.Element, tag: str, ns_candidates: list[str]) -> ET.Element | None:
     """Найти первый дочерний элемент ``tag`` в одном из namespace-кандидатов."""
@@ -103,6 +106,7 @@ def _parse_root(xml_text: str) -> ET.Element | None:
 # ---------------------------------------------------------------------------
 # Итераторы по EntityType / Property
 # ---------------------------------------------------------------------------
+
 
 def iter_entity_types(root: ET.Element):
     """Итератор по всем ``EntityType`` из $metadata (поддержка разных namespace)."""
@@ -140,6 +144,7 @@ def iter_nav_properties(etype: ET.Element):
 # Парсинг EntitySet → Schema → EntityContainer
 # ---------------------------------------------------------------------------
 
+
 def find_schema(root: ET.Element) -> ET.Element | None:
     """Найти элемент Schema внутри EDMX DataServices."""
     ns_list = EDM_NAMESPACES + [""]
@@ -169,6 +174,7 @@ def get_namespace(schema: ET.Element) -> str:
 # ---------------------------------------------------------------------------
 # Основные функции парсинга
 # ---------------------------------------------------------------------------
+
 
 def parse_entity_sets(xml_text: str) -> list[dict]:
     """Разобрать XML $metadata → список ``{'name': ..., 'label': ...}``.
@@ -254,6 +260,7 @@ def search_entities(
 # Классификация по типам 1С (для odata-cfg-info)
 # ---------------------------------------------------------------------------
 
+
 def classify_entity_sets(
     xml_text: str,
 ) -> tuple[OrderedDict, dict[str, list[str]], list[ET.Element], str]:
@@ -287,7 +294,7 @@ def classify_entity_sets(
         for prefix, type_name in PREFIX_TO_TYPE.items():
             if name.startswith(prefix):
                 matched_type = type_name
-                matched_obj_name = name[len(prefix):]
+                matched_obj_name = name[len(prefix) :]
                 break
         if matched_type and matched_obj_name is not None:
             if matched_type not in type_counts:
