@@ -127,8 +127,19 @@ class Chat:
         """Обработка входящего сообщения из любого транспорта."""
         chat_id = inbound.chat_id
         user_text = inbound.text
+        format_question = user_text
 
         history = self._history_mgr.get(chat_id)
+
+        if inbound.channel == TransportChannel.EMAIL:
+            thread_count = inbound.metadata.get("thread_message_count", 1)
+            if not history and inbound.thread_context and thread_count > 1:
+                user_text = (
+                    f"Контекст email-переписки ({thread_count} сообщений):\n\n"
+                    f"{inbound.thread_context}\n\n"
+                    f"--- Текущий запрос ---\n{inbound.text}"
+                )
+            format_question = inbound.text
 
         agent_result = await self._agent.process_message(
             user_text,
@@ -141,7 +152,11 @@ class Chat:
         if agent_result.skip_formatter:
             answer = agent_result.text
         else:
-            answer = await self._format(answer=agent_result.text, user_question=user_text, channel=inbound.channel)
+            answer = await self._format(
+                answer=agent_result.text,
+                user_question=format_question,
+                channel=inbound.channel,
+            )
 
         pagination_ctx = self._extract_pagination_context(agent_result.history)
 
@@ -152,7 +167,11 @@ class Chat:
                     pagination_ctx, user_text, fallback=answer, chat_id=inbound.chat_id
                 )
                 if not agent_result.skip_formatter:
-                    answer = await self._format(full_answer, user_question=user_text, channel=inbound.channel)
+                    answer = await self._format(
+                        full_answer,
+                        user_question=format_question,
+                        channel=inbound.channel,
+                    )
                 else:
                     answer = full_answer
             return self._finalize_email(

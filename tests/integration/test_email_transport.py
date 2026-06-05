@@ -115,9 +115,46 @@ async def test_thread_reply_includes_context(transport):
 
     assert len(transport._received) == 2  # type: ignore[attr-defined]
     second = transport._received[1]  # type: ignore[attr-defined]
-    assert "Контекст переписки" in second.text
-    assert "Текущий запрос" in second.text
+    assert second.text == "Уточнение"
+    assert "Первый вопрос" in second.thread_context
     assert second.conversation_id == email_conversation_id(first_id)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_thread_stores_bot_reply(transport):
+    first_id = "<msg-1@thread>"
+
+    class FakeSMTP:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def login(self, user, password):
+            pass
+
+        def send_message(self, msg):
+            pass
+
+    with patch("bot.email.transport.smtplib.SMTP", FakeSMTP):
+        await transport._handle_email(
+            _make_email(
+                subject="Отпуск",
+                body="Сколько сотрудников в отпуске?",
+                message_id=first_id,
+            )
+        )
+
+    thread = transport._store.get_thread(first_id)
+    assert len(thread) == 2
+    assert thread[0].role == "user"
+    assert thread[1].role == "assistant"
+    assert thread[1].body == "Ответ бота"
 
 
 @pytest.mark.integration

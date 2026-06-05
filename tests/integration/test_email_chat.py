@@ -10,7 +10,14 @@ import pytest
 from bot.chat import Chat
 from bot.config import load_settings
 from bot.history import HistoryManager
-from bot.messages import AgentProcessResult, Attachment, InboundMessage, TransportChannel, email_conversation_id
+from bot.messages import (
+    AgentProcessResult,
+    Attachment,
+    InboundMessage,
+    TransportChannel,
+    conversation_id_to_chat_id,
+    email_conversation_id,
+)
 from bot.metrics import session_tokens
 
 
@@ -151,6 +158,40 @@ async def test_skip_formatter_raw_text(email_chat):
 
     formatter.format_response.assert_not_awaited()
     assert len(outbound.attachments) >= 1
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_thread_followup_uses_chat_history(email_chat):
+    """Follow-up в цепочке — короткий вопрос + история, как в отдельном чате."""
+    chat, agent, formatter = email_chat
+    conv_id = email_conversation_id("<thread-vacation@test>")
+    chat.chat_id = conversation_id_to_chat_id(conv_id)
+    chat.save_history(
+        [
+            {"role": "user", "content": "Сколько сотрудников в отпуске?"},
+            {"role": "assistant", "content": "1"},
+        ]
+    )
+
+    inbound = InboundMessage(
+        conversation_id=conv_id,
+        channel=TransportChannel.EMAIL,
+        text="Какой?",
+        sender="tester@local.test",
+        thread_context="От: tester\n\nСколько сотрудников в отпуске?\n\nОтвет бота:\n\n1",
+        metadata={"thread_message_count": 3, "subject": "Re: Отпуск"},
+    )
+
+    await chat.process_inbound(inbound)
+
+    agent.process_message.assert_awaited_once()
+    called_text, called_history = agent.process_message.await_args.args[:2]
+    assert called_text == "Какой?"
+    assert called_history[-2]["content"] == "Сколько сотрудников в отпуске?"
+    assert called_history[-1]["content"] == "1"
+    formatter.format_response.assert_awaited()
+    assert formatter.format_response.await_args.kwargs.get("user_question") == "Какой?"
 
 
 @pytest.mark.integration

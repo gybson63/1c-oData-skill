@@ -156,6 +156,39 @@ class TestThreadContext:
         assert "Сообщение номер 2" in latest
         assert "Сообщение номер 0" in full
 
+    def test_thread_with_bot_replies(self, tmp_path):
+        from bot.email.store import EmailThreadStore
+
+        store = EmailThreadStore(tmp_path)
+        meta = EmailMessageMeta(
+            message_id="<u1>",
+            subject="Отпуск",
+            sender="user@test",
+            thread_id="<thread-1>",
+        )
+        store.add_message(meta, "Сколько в отпуске?")
+        store.add_bot_reply(
+            thread_id="<thread-1>",
+            message_id="<b1>",
+            body="1",
+            subject="Re: Отпуск",
+            in_reply_to="<u1>",
+        )
+        store.add_message(
+            EmailMessageMeta(
+                message_id="<u2>",
+                subject="Re: Отпуск",
+                sender="user@test",
+                thread_id="<thread-1>",
+            ),
+            "Какой?",
+        )
+        ctx = build_thread_context(store.get_thread("<thread-1>"))
+        assert "Сколько в отпуске" in ctx
+        assert "Ответ бота" in ctx
+        assert "1" in ctx
+        assert "Какой?" in ctx
+
 
 class TestEmailFormatter:
     def test_markdownish_to_html_bold(self):

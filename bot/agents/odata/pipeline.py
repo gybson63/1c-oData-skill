@@ -39,6 +39,7 @@ from bot.agents.odata.tool_resolver import (
     TextToolCallResolver,
     ToolResolver,
 )
+from bot.agents.odata.visualization_advisor import VisualizationAdvisor
 from bot.messages import Attachment
 from bot.utils import esc_html
 from bot_lib.dataframe import dataframe_preview_html
@@ -338,17 +339,51 @@ class ODataPipeline:
             raise QueryError(f"Ошибка аналитики: {esc_html(str(e))}") from e
 
         plan = result.plan
-        state.analytics_plan = plan
         df = result.dataframe
-        chart_title = plan.chart.title if plan.chart and plan.chart.title else "Аналитика"
+
+        advisor = VisualizationAdvisor(
+            pie_max_categories=10,
+            max_categories=self._chart_max_categories,
+        )
+        viz = await advisor.advise(
+            self._ai,
+            user_query=state.user_text,
+            df=df,
+            plan=plan,
+            chat_id=state.chat_id,
+        )
+        log.info(
+            "VisualizationAdvisor: chart=%s table=%s source=%s reason=%s",
+            viz.show_chart,
+            viz.show_table,
+            viz.source,
+            viz.reason[:120] if viz.reason else "",
+        )
+
+        if viz.chart:
+            plan = plan.model_copy(update={"chart": viz.chart})
+        elif not viz.show_chart:
+            plan = plan.model_copy(update={"chart": None})
+        state.analytics_plan = plan
+
+        chart_title = (
+            (viz.chart.title if viz.chart and viz.chart.title else None)
+            or (plan.chart.title if plan.chart and plan.chart.title else None)
+            or "Аналитика"
+        )
         parts = [f"<b>📊 {esc_html(chart_title)}</b>"]
         if plan.explanation:
             parts.append(f"<i>{esc_html(plan.explanation)}</i>")
-        parts.append(dataframe_preview_html(df, max_rows=20))
+        if viz.reason and viz.source == "ai":
+            parts.append(f"<small>Формат: {esc_html(viz.reason)}</small>")
+        if viz.show_table:
+            parts.append(dataframe_preview_html(df, max_rows=20))
+        else:
+            parts.append(f"<i>Строк в выборке: {len(df)}</i>")
         state.answer_html = "\n".join(parts)
         state.dataframe_summary = f"Строк: {len(df)}"
 
-        if plan.chart:
+        if viz.show_chart and plan.chart:
             try:
                 png_bytes = render_png(
                     df,

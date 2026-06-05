@@ -239,6 +239,9 @@ def _check_asserts(scenario: Scenario, reply, original_msg_id: str) -> None:
             assert_reply_in_thread(reply, original_msg_id)
         elif name == "uses_context":
             assert len(text.strip()) > 5
+        elif name == "answers_followup":
+            assert len(text.strip()) > 3
+            assert not re.search(r"не понял|уточните запрос|переформулируйте", text, re.I)
         elif name == "no_reply":
             raise AssertionError("Expected no reply but got one")
         elif name == "has_attachment_or_long_body":
@@ -357,6 +360,37 @@ async def test_e2e_unknown_entity(e2e_bot_runtime):
 @pytest.mark.slow
 @pytest.mark.integration
 @pytest.mark.asyncio
+@pytest.mark.timeout(600)
+async def test_e2e_zup_thread_dialog(e2e_bot_runtime):
+    """Диалог в цепочке: «сколько в отпуске» → «какой?»."""
+    _, settings = e2e_bot_runtime
+    scenario = scenario_by_id("email-zup-thread-dialog")
+    setup = scenario.extra.get("thread_setup", {})
+    subject = unique_subject("zup-dialog")
+    first_id, first_reply = await _run_email_roundtrip(
+        settings,
+        subject=subject,
+        body=setup.get("first_question", scenario.extra.get("first_question", "")),
+    )
+    assert_no_error(body_text(first_reply))
+
+    msg_id, reply = await _run_email_roundtrip(
+        settings,
+        subject=f"Re: {subject}",
+        body=scenario.question,
+        in_reply_to=first_id,
+        references=first_id,
+    )
+    try:
+        _check_asserts(scenario, reply, msg_id)
+    except AssertionError:
+        save_artifact(f"{subject}-dialog", reply.raw)
+        raise
+
+
+@pytest.mark.slow
+@pytest.mark.integration
+@pytest.mark.asyncio
 @pytest.mark.timeout(360)
 async def test_e2e_zup_thread_followup(e2e_bot_runtime):
     """Уточнение отбора — как в настройках типового отчёта."""
@@ -467,6 +501,7 @@ def test_catalog_implemented_e2e_ids_exist():
         "email-reference-labels",
         "email-unknown-entity",
         "email-thread-followup",
+        "email-zup-thread-dialog",
         "email-disallowed-sender",
         "email-long-report",
         "email-empty-body",

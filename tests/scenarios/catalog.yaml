@@ -144,6 +144,18 @@ scenarios:
     thread_setup:
       first_question: "Покажи 10 сотрудников с должностью и подразделением"
 
+  - id: email-zup-thread-dialog
+    layer: e2e
+    domain: zup
+    report_analog: "Диалог в цепочке писем"
+    question: "Какой?"
+    asserts: [no_error, reply_in_thread, uses_context, answers_followup]
+    status: implemented
+    owner: email
+    notes: "Follow-up в той же цепочке: отпуск → уточнение"
+    thread_setup:
+      first_question: "Сколько сотрудников сейчас в отпуске?"
+
   - id: email-inbound-csv
     layer: e2e
     domain: zup

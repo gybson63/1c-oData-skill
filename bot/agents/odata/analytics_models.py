@@ -47,6 +47,16 @@ class ChartSpec(BaseModel):
     title: str = ""
 
 
+class VisualizationDecision(BaseModel):
+    """Решение субагента визуализации."""
+
+    show_chart: bool = False
+    show_table: bool = True
+    chart: ChartSpec | None = None
+    reason: str = ""
+    source: Literal["rules", "ai"] = "rules"
+
+
 class AnalyticsPlan(BaseModel):
     """План analytics-обработки от AI Step 1."""
 

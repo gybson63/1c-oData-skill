@@ -164,26 +164,17 @@ class EmailTransport:
 
         latest_text, thread_context = build_user_text_from_thread(thread, self._thread_config)
 
-        # Собрать user_text: контекст цепочки + последнее сообщение
-        if len(thread) > 1 and thread_context:
-            user_text = (
-                f"Контекст переписки ({len(thread)} писем):\n\n"
-                f"{thread_context}\n\n"
-                f"--- Текущий запрос ---\n{latest_text}"
-            )
-        else:
-            user_text = latest_text
-
         inbound = InboundMessage(
             conversation_id=email_conversation_id(meta.thread_id),
             channel=TransportChannel.EMAIL,
-            text=user_text,
+            text=latest_text,
             sender=meta.sender,
             attachments=attachments,
             metadata={
                 "message_id": meta.message_id,
                 "subject": meta.subject,
                 "thread_id": meta.thread_id,
+                "thread_message_count": len(thread),
             },
             thread_context=thread_context,
         )
@@ -195,14 +186,31 @@ class EmailTransport:
             return
 
         if outbound:
-            await self._send_reply(meta, outbound)
+            await self._send_reply(meta, outbound, outbound_text=outbound.text)
 
-    async def _send_reply(self, original_meta, outbound: OutboundMessage) -> None:
+    async def _send_reply(
+        self,
+        original_meta,
+        outbound: OutboundMessage,
+        *,
+        outbound_text: str = "",
+    ) -> None:
         """Отправить ответ по SMTP."""
         loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, self._send_reply_sync, original_meta, outbound)
+        await loop.run_in_executor(
+            None,
+            self._send_reply_sync,
+            original_meta,
+            outbound,
+            outbound_text,
+        )
 
-    def _send_reply_sync(self, original_meta, outbound: OutboundMessage) -> None:
+    def _send_reply_sync(
+        self,
+        original_meta,
+        outbound: OutboundMessage,
+        outbound_text: str = "",
+    ) -> None:
         settings = self._settings
 
         token_footer = ""
@@ -276,6 +284,15 @@ class EmailTransport:
                     smtp.login(settings.smtp_user, settings.smtp_password)
                     smtp.send_message(msg)
 
+            sent_message_id = msg["Message-ID"]
+            reply_body = outbound_text.strip() or plain_body
+            self._store.add_bot_reply(
+                thread_id=original_meta.thread_id,
+                message_id=sent_message_id,
+                body=reply_body,
+                subject=subject,
+                in_reply_to=original_meta.message_id,
+            )
             log.info("Email ответ отправлен: %s → %s", subject, original_meta.sender)
         except smtplib.SMTPException as e:
             log.error("SMTP error: %s", e)

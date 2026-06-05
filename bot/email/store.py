@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import asdict, dataclass, field
+from datetime import UTC
 from pathlib import Path
 
 from bot.messages import Attachment, EmailMessageMeta
@@ -22,6 +23,7 @@ class ThreadMessage:
     html_body: str = ""
     attachment_names: list[str] = field(default_factory=list)
     attachment_text: str = ""
+    role: str = "user"  # user | assistant
 
 
 class EmailThreadStore:
@@ -92,6 +94,41 @@ class EmailThreadStore:
         self._save_thread(meta.thread_id, thread)
         return thread
 
+    def add_bot_reply(
+        self,
+        *,
+        thread_id: str,
+        message_id: str,
+        body: str,
+        subject: str = "",
+        in_reply_to: str = "",
+    ) -> list[ThreadMessage]:
+        """Сохранить исходящий ответ бота в цепочке (для контекста follow-up)."""
+        thread = self.get_thread(thread_id)
+        existing_ids = {m.meta.message_id for m in thread}
+        if message_id and message_id in existing_ids:
+            return thread
+
+        from datetime import datetime
+
+        meta = EmailMessageMeta(
+            message_id=message_id,
+            in_reply_to=in_reply_to,
+            subject=subject,
+            sender="bot",
+            date=datetime.now(UTC).isoformat(),
+            thread_id=thread_id,
+        )
+        thread.append(
+            ThreadMessage(
+                meta=meta,
+                body=body,
+                role="assistant",
+            )
+        )
+        self._save_thread(thread_id, thread)
+        return thread
+
     def get_thread(self, thread_id: str) -> list[ThreadMessage]:
         path = self._thread_path(thread_id)
         if not path.is_file():
@@ -119,6 +156,7 @@ def _thread_message_to_dict(msg: ThreadMessage) -> dict:
         "html_body": msg.html_body,
         "attachment_names": msg.attachment_names,
         "attachment_text": msg.attachment_text,
+        "role": msg.role,
     }
 
 
@@ -130,4 +168,5 @@ def _dict_to_thread_message(data: dict) -> ThreadMessage:
         html_body=data.get("html_body", ""),
         attachment_names=data.get("attachment_names", []),
         attachment_text=data.get("attachment_text", ""),
+        role=data.get("role", "user"),
     )

@@ -24,13 +24,20 @@ class ThreadContextConfig:
 
 def format_single_message(msg: ThreadMessage, max_chars: int | None = None) -> str:
     """Отформатировать одно письмо для AI-контекста."""
-    lines = [
-        f"От: {msg.meta.sender}",
-        f"Дата: {msg.meta.date}",
-        f"Тема: {msg.meta.subject}",
-        "",
-        msg.body,
-    ]
+    if msg.role == "assistant":
+        lines = [
+            f"Ответ бота ({msg.meta.date or 'без даты'}):",
+            "",
+            msg.body,
+        ]
+    else:
+        lines = [
+            f"От: {msg.meta.sender}",
+            f"Дата: {msg.meta.date}",
+            f"Тема: {msg.meta.subject}",
+            "",
+            msg.body,
+        ]
     if msg.attachment_names:
         lines.append(f"\n[Вложения: {', '.join(msg.attachment_names)}]")
     if msg.attachment_text:
