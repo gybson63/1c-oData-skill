@@ -14,8 +14,9 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -322,10 +323,10 @@ class Chat:
         )
 
     @staticmethod
-    def _has_more_pages(pagination_ctx: dict) -> bool:
-        total = pagination_ctx.get("total", 0)
-        skip = pagination_ctx.get("skip", 0)
-        shown = pagination_ctx.get("shown", 0)
+    def _has_more_pages(pagination_ctx: dict[str, Any]) -> bool:
+        total = int(pagination_ctx.get("total", 0))
+        skip = int(pagination_ctx.get("skip", 0))
+        shown = int(pagination_ctx.get("shown", 0))
         return total > skip + shown
 
     async def _fetch_all_for_email(
@@ -338,12 +339,16 @@ class Chat:
     ) -> str:
         """Загрузить все страницы OData для email-ответа."""
         agent = self._agent
-        if not hasattr(agent, "execute_all_pages_with_ctx"):
+        fetch_all = cast(
+            Callable[..., Awaitable[str]] | None,
+            getattr(agent, "execute_all_pages_with_ctx", None),
+        )
+        if fetch_all is None:
             return fallback
 
         settings = get_settings()
         try:
-            return await agent.execute_all_pages_with_ctx(
+            return await fetch_all(
                 pagination_ctx,
                 user_text,
                 chat_id=chat_id,

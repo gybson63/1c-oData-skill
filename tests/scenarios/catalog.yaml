@@ -1,27 +1,178 @@
 # Каталог email-сценариев — живая спецификация поведения бота.
 # Статусы: planned | implemented | flaky | blocked
 #
-# Workflow:
-#   1. Новая фича → planned
-#   2. L1/L3 тест → implemented
-#   3. Нестабильный прогон → flaky + issue в backlog
+# Сценарии ЗУП основаны на типовых отчётах 1С:ЗУП 3.1:
+# «Штатные сотрудники», «Личные данные», «Анализ зарплаты», «Остатки отпусков» и др.
+# (см. docs/email-testing.md — раздел «Сценарии ЗУП»).
 
 scenarios:
+  # --- Кадры (аналог «Штатные сотрудники», «Личные данные») ---
+
   - id: email-list-employees
     layer: e2e
-    question: "Покажи 5 сотрудников из справочника"
-    asserts: [no_error, has_table_or_list, reply_in_thread]
+    domain: zup
+    report_analog: "Штатные сотрудники"
+    question: "Покажи 10 штатных сотрудников: ФИО, должность и подразделение"
+    asserts: [no_error, has_table_or_list, has_hr_fields, reply_in_thread]
     status: implemented
     owner: odata
-    notes: "Базовый список сущностей"
+    notes: "Список работающих сотрудников с кадровыми полями"
 
   - id: email-count-employees
     layer: e2e
-    question: "Сколько записей в справочнике сотрудников?"
+    domain: zup
+    report_analog: "Штатные сотрудники"
+    question: "Сколько сотрудников в справочнике Catalog_Сотрудники?"
     asserts: [no_error, has_number]
     status: implemented
     owner: odata
-    notes: "Count-ветка пайплайна"
+    notes: "Численность штата"
+
+  - id: email-zup-organizations
+    layer: e2e
+    domain: zup
+    report_analog: "Параметр «Организация» в отчётах"
+    question: "Покажи список организаций из справочника"
+    asserts: [no_error, has_organization, has_catalog_list]
+    status: implemented
+    owner: odata
+    notes: "Catalog_Организации"
+
+  - id: email-zup-departments
+    layer: e2e
+    domain: zup
+    report_analog: "Отбор по подразделению"
+    question: "Покажи подразделения организаций: наименование и код"
+    asserts: [no_error, has_department, has_catalog_list]
+    status: implemented
+    owner: odata
+    notes: "Catalog_ПодразделенияОрганизаций"
+
+  - id: email-zup-positions
+    layer: e2e
+    domain: zup
+    report_analog: "Штатное расписание / должности"
+    question: "Покажи 15 должностей из справочника"
+    asserts: [no_error, has_position, has_catalog_list]
+    status: implemented
+    owner: odata
+    notes: "Catalog_Должности"
+
+  - id: email-zup-physical-persons
+    layer: e2e
+    domain: zup
+    report_analog: "Личные данные сотрудников"
+    question: "Покажи 5 физических лиц: ФИО и дату рождения, если есть"
+    asserts: [no_error, has_person_name, has_catalog_list]
+    status: implemented
+    owner: odata
+    notes: "Catalog_ФизическиеЛица"
+
+  - id: email-reference-labels
+    layer: e2e
+    domain: zup
+    report_analog: "Штатные сотрудники с расшифровкой ссылок"
+    question: "Покажи 5 сотрудников с расшифровкой подразделения и должности, не GUID"
+    asserts: [no_error, has_hr_fields, human_readable_labels]
+    status: implemented
+    owner: odata
+    notes: "Reference labels вместо Ref_Key"
+
+  - id: email-long-report
+    layer: e2e
+    domain: zup
+    report_analog: "Личные данные / расширенная выгрузка"
+    question: "Выгрузи до 50 сотрудников с табельным номером и датой приёма"
+    asserts: [no_error, has_attachment_or_long_body]
+    status: implemented
+    owner: email
+    notes: "Граница inline_max_chars"
+
+  - id: email-max-fetch-cap
+    layer: e2e
+    domain: zup
+    report_analog: "Полная выгрузка штата"
+    question: "Выгрузи все записи справочника сотрудников"
+    asserts: [no_error, respects_max_fetch]
+    status: implemented
+    owner: email
+    notes: "Лимит max_fetch_records"
+
+  # --- Зарплата и аналитика (сложнее через OData) ---
+
+  - id: email-analytics-chart
+    layer: e2e
+    domain: zup
+    report_analog: "Штатная расстановка / численность"
+    question: "Построй график численности сотрудников по подразделениям"
+    asserts: [no_error, has_png_attachment]
+    status: planned
+    owner: analytics
+    notes: "Analytics: группировка по подразделению"
+
+  - id: email-zup-payroll-analysis
+    layer: e2e
+    domain: zup
+    report_analog: "Анализ зарплаты по сотрудникам"
+    question: "Покажи начисления по сотрудникам за последний месяц"
+    asserts: [no_error, has_number]
+    status: blocked
+    owner: odata
+    notes: "Нужны регистры расчёта / документы начисления — не все ИБ в OData"
+
+  - id: email-zup-vacation-balance
+    layer: e2e
+    domain: zup
+    report_analog: "Остатки отпусков"
+    question: "Сколько дней отпуска осталось у сотрудников?"
+    asserts: [no_error, has_number]
+    status: blocked
+    owner: odata
+    notes: "Регистр остатков отпусков — зависит от публикации OData"
+
+  # --- Email-инфраструктура ---
+
+  - id: email-thread-followup
+    layer: e2e
+    domain: zup
+    report_analog: "Уточнение отбора в отчёте"
+    question: "Оставь только первые 3"
+    asserts: [no_error, reply_in_thread, uses_context]
+    status: implemented
+    owner: email
+    notes: "Уточнение к списку сотрудников"
+    thread_setup:
+      first_question: "Покажи 10 сотрудников с должностью и подразделением"
+
+  - id: email-inbound-csv
+    layer: e2e
+    domain: zup
+    report_analog: "Сверка списка из Excel"
+    question: "Проанализируй приложенный список численности по подразделениям"
+    asserts: [no_error, mentions_attachment]
+    status: implemented
+    owner: email
+    notes: "Входящий CSV с кадровыми данными"
+    attachment:
+      filename: chislennost.csv
+      content: "podrazdelenie,sotrudniki\nОтдел кадров,12\nБухгалтерия,5\nIT,8"
+
+  - id: email-empty-body
+    layer: e2e
+    question: ""
+    asserts: [polite_response]
+    status: implemented
+    owner: email
+    notes: "Пустое письмо"
+
+  - id: email-disallowed-sender
+    layer: e2e
+    question: "Покажи штатных сотрудников"
+    asserts: [no_reply]
+    status: implemented
+    owner: email
+    notes: "Отправитель не в allowed_senders"
+    from_addr: stranger@blocked.test
 
   - id: email-unknown-entity
     layer: e2e
@@ -31,69 +182,18 @@ scenarios:
     owner: odata
     notes: "Ошибка OData без traceback"
 
-  - id: email-long-report
-    layer: e2e
-    question: "Покажи 50 сотрудников с полным описанием"
-    asserts: [no_error, has_attachment_or_long_body]
-    status: planned
-    owner: email
-    notes: "Граница inline_max_chars"
-
-  - id: email-thread-followup
-    layer: e2e
-    question: "А теперь только первые 3"
-    asserts: [no_error, reply_in_thread, uses_context]
-    status: implemented
-    owner: email
-    notes: "Второе письмо в цепочке In-Reply-To"
-    thread_setup:
-      first_question: "Покажи 10 сотрудников"
-
-  - id: email-inbound-csv
-    layer: e2e
-    question: "Проанализируй данные из вложения"
-    asserts: [no_error, mentions_attachment]
-    status: planned
-    owner: email
-    notes: "Входящий CSV во вложении"
-    attachment:
-      filename: data.csv
-      content: "name,value\nA,1\nB,2"
-
-  - id: email-analytics-chart
-    layer: e2e
-    question: "Построй график количества документов по месяцам"
-    asserts: [no_error, has_png_attachment]
-    status: planned
-    owner: analytics
-    notes: "Analytics + chart.html"
-
   - id: email-analytics-thread
     layer: e2e
+    domain: zup
     question: "Измени тип графика на столбчатый"
     asserts: [no_error, reply_in_thread]
     status: planned
     owner: analytics
-    notes: "Уточнение к предыдущему графику"
+    notes: "Уточнение к графику численности"
     thread_setup:
-      first_question: "Построй график продаж по месяцам"
+      first_question: "Построй график сотрудников по подразделениям"
 
-  - id: email-empty-body
-    layer: e2e
-    question: ""
-    asserts: [polite_response]
-    status: planned
-    owner: email
-    notes: "Пустое письмо"
-
-  - id: email-disallowed-sender
-    layer: e2e
-    question: "Покажи сотрудников"
-    asserts: [no_reply]
-    status: implemented
-    owner: email
-    notes: "Отправитель не в allowed_senders"
-    from_addr: stranger@blocked.test
+  # --- L1 / L2 (без изменений) ---
 
   - id: chat-short-inline
     layer: l1
@@ -123,6 +223,13 @@ scenarios:
     status: implemented
     owner: chat
 
+  - id: chat-empty-body
+    layer: l1
+    question: ""
+    asserts: [polite_response]
+    status: implemented
+    owner: chat
+
   - id: transport-thread-context
     layer: l2
     question: "thread"
@@ -143,19 +250,3 @@ scenarios:
     asserts: [sender_filter]
     status: implemented
     owner: transport
-
-  - id: email-reference-labels
-    layer: e2e
-    question: "Покажи документы с расшифровкой ссылочных полей"
-    asserts: [no_error, human_readable_labels]
-    status: planned
-    owner: odata
-    notes: "Reference labels в таблице"
-
-  - id: email-max-fetch-cap
-    layer: e2e
-    question: "Выгрузи все записи справочника номенклатуры"
-    asserts: [no_error, respects_max_fetch]
-    status: planned
-    owner: email
-    notes: "Лимит max_fetch_records"

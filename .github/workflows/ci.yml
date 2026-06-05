@@ -49,8 +49,7 @@ jobs:
         run: ruff format --check .
 
       - name: Mypy type-check
-        run: mypy bot/ bot_lib/ mcp_servers/ --ignore-missing-imports
-        continue-on-error: true   # не блокировать PR на начальном этапе
+        run: mypy bot/ bot_lib/ mcp_servers/
 
   # ===========================================================================
   # Test — pytest + coverage

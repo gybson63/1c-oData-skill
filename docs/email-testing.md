@@ -22,7 +22,7 @@ docker compose -f docker-compose.test.yml up -d mail
 
 - `3025` — SMTP
 - `3143` — IMAP
-- `8025` — Web UI GreenMail
+- `8025` — GreenMail API (OpenAPI, не веб-почта)
 
 Пользователи (пароль `secret`):
 
@@ -40,6 +40,8 @@ cp env.test.example.json env.test.json
 ```
 
 2. Заполните `ai_api_key` и `agents.odata` (URL и учётные данные тестовой ИБ).
+
+3. Для сценария `email-max-fetch-cap` задайте `email.max_fetch_records` (например `30`) — иначе проверка лимита выгрузки не сработает.
 
 `env.test.json` в `.gitignore` — не коммитьте секреты.
 
@@ -67,7 +69,7 @@ pytest tests/integration/test_email_chat.py tests/integration/test_email_transpo
 
 ```bash
 docker compose -f docker-compose.test.yml up -d mail
-pytest -m "slow" tests/integration/test_email_e2e.py -v --timeout=300
+pytest -m "slow" tests/integration/test_email_e2e.py -v --timeout=700
 ```
 
 Один сценарий:
@@ -77,6 +79,27 @@ pytest -m "slow" tests/integration/test_email_e2e.py -k list_employees -v
 ```
 
 При падении MIME-ответы сохраняются в `tests/artifacts/` (gitignored).
+
+## Сценарии ЗУП
+
+E2E-вопросы привязаны к типовым задачам **1С:ЗУП 3.1** (по материалам о настройке типовых отчётов: [Хэндисофт](https://handy-soft.ru/blog/nastrojka-tipovyh-otchyotov-v-1s-zup/), [1С-ИЖТИСИ](https://xn--1--rlchba2deh.xn--p1ai/%D1%81%D1%82%D0%B0%D1%82%D1%8C%D0%B8/%D0%BE%D1%82%D1%87%D0%B5%D1%82%D1%8B_%D0%B7%D1%83%D0%BF)):
+
+| Задача в ЗУП | Типовой отчёт / раздел | Сценарий каталога | OData-объект |
+|--------------|------------------------|-------------------|--------------|
+| Список работающих с должностью и подразделением | Штатные сотрудники | `email-list-employees` | `Catalog_Сотрудники` |
+| Численность штата | Штатные сотрудники | `email-count-employees` | `Catalog_Сотрудники` |
+| Список юрлиц | Параметр «Организация» | `email-zup-organizations` | `Catalog_Организации` |
+| Отбор по подразделению | Отбор в кадровых отчётах | `email-zup-departments` | `Catalog_ПодразделенияОрганизаций` |
+| Должности / штатное расписание | Штатное расписание | `email-zup-positions` | `Catalog_Должности` |
+| Паспортные и личные данные | Личные данные сотрудников | `email-zup-physical-persons` | `Catalog_ФизическиеЛица` |
+| Расшифровка ссылок | Настройка полей отчёта | `email-reference-labels` | ссылочные поля |
+| Расширенная выгрузка | Личные данные / штатные | `email-long-report` | `Catalog_Сотрудники` |
+| Сверка списка из Excel | Внешние данные | `email-inbound-csv` | вложение CSV |
+| Уточнение отбора в переписке | Вариант отчёта | `email-thread-followup` | контекст цепочки |
+
+Сценарии `blocked` (зарплата, остатки отпусков) требуют регистров расчёта — зависят от публикации OData в конкретной ИБ.
+
+Просмотр тестовой почты: GreenMail **не имеет веб-почтовика** — только API на `:8025`. Письма смотрите через IMAP-клиент (Thunderbird): логин `bot` / `tester`, пароль `secret`, порт `3143`, без шифрования.
 
 ## Каталог сценариев
 

@@ -219,11 +219,11 @@ def _is_temporal_column(name: str, series: pd.Series) -> bool:
         return False
 
     parsed = pd.to_datetime(text_sample, errors="coerce", dayfirst=True)
-    return parsed.notna().mean() >= 0.8
+    return bool(parsed.notna().mean() >= 0.8)
 
 
 def _is_numeric(series: pd.Series) -> bool:
-    return pd.api.types.is_numeric_dtype(pd.to_numeric(series, errors="coerce"))
+    return bool(pd.api.types.is_numeric_dtype(pd.to_numeric(series, errors="coerce")))
 
 
 def _values_non_negative(series: pd.Series) -> bool:

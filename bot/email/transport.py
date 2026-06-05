@@ -94,6 +94,7 @@ class EmailTransport:
         result: list[tuple[str, bytes]] = []
 
         try:
+            imap: imaplib.IMAP4 | imaplib.IMAP4_SSL
             if settings.imap_use_ssl:
                 imap = imaplib.IMAP4_SSL(settings.imap_host, settings.imap_port)
             else:

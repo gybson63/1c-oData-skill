@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import quote, urlencode
 
 import httpx
@@ -181,7 +181,7 @@ class ODataClient:
                 "/$metadata",
                 headers={"Accept": "application/xml"},
             )
-        return response.text
+        return str(response.text)
 
     async def raw_request(
         self,
@@ -208,12 +208,15 @@ class ODataClient:
         """
         path = f"/{entity}" if not entity.startswith("/") else entity
         request_headers = dict(headers or {})
-        return await self._request_raw(
-            method,
-            path,
-            params=params,
-            json_data=json_data,
-            headers=request_headers if request_headers else None,
+        return cast(
+            httpx.Response,
+            await self._request_raw(
+                method,
+                path,
+                params=params,
+                json_data=json_data,
+                headers=request_headers if request_headers else None,
+            ),
         )
 
     # ------------------------------------------------------------------
@@ -393,7 +396,7 @@ class ODataClient:
         """Выполнить запрос и вернуть JSON."""
         response = await self._request_raw(method, path, params=params)
         try:
-            return response.json()
+            return cast(dict[str, Any], response.json())
         except Exception as exc:
             from bot_lib.exceptions import ODataParseError
 

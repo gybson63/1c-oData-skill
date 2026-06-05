@@ -92,7 +92,7 @@ def guess_catalog_entity(column: str, metadata: Any | None = None) -> str | None
         candidates = metadata.search_entities(column.replace("_Key", ""))
         for name in candidates:
             if name.startswith("Catalog_"):
-                return name
+                return str(name)
 
     return None
 

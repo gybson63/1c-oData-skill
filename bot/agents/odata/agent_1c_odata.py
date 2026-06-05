@@ -13,7 +13,10 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from bot.mcp_client import MCPClientManager
 
 from openai import AsyncOpenAI
 
@@ -42,7 +45,7 @@ class ODataAgent(BaseAgent):
         super().__init__()
         self._ai_client: AsyncOpenAI | None = None
         self._metadata = MetadataCache()
-        self._mcp_manager = None
+        self._mcp_manager: MCPClientManager | None = None
         self._cfg: dict[str, Any] = {}
         self._model: str = ""
         self._pipeline: ODataPipeline | None = None

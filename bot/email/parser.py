@@ -9,10 +9,30 @@ import re
 from email.header import decode_header
 from email.message import Message
 from email.utils import parseaddr, parsedate_to_datetime
+from typing import Any
 
 from bot.messages import Attachment, EmailMessageMeta
 
 log = logging.getLogger(__name__)
+
+
+def _payload_as_bytes(payload: Any) -> bytes | None:
+    """Привести результат get_payload(decode=True) к bytes."""
+    if payload is None:
+        return None
+    if isinstance(payload, bytes):
+        return payload
+    if isinstance(payload, str):
+        return payload.encode("utf-8")
+    return None
+
+
+def _decode_payload_bytes(payload: bytes, charset: str) -> str:
+    try:
+        return payload.decode(charset, errors="replace")
+    except (LookupError, UnicodeDecodeError):
+        return payload.decode("utf-8", errors="replace")
+
 
 # Паттерны начала блока цитирования (рус/англ)
 _QUOTE_PATTERNS = [
@@ -127,27 +147,21 @@ def extract_body(msg: Message) -> tuple[str, str]:
             disposition = str(part.get("Content-Disposition", ""))
             if "attachment" in disposition:
                 continue
-            payload = part.get_payload(decode=True)
-            if payload is None:
+            raw_payload = _payload_as_bytes(part.get_payload(decode=True))
+            if raw_payload is None:
                 continue
             charset = part.get_content_charset() or "utf-8"
-            try:
-                decoded = payload.decode(charset, errors="replace")
-            except (LookupError, UnicodeDecodeError):
-                decoded = payload.decode("utf-8", errors="replace")
+            decoded = _decode_payload_bytes(raw_payload, charset)
 
             if content_type == "text/plain":
                 plain_parts.append(decoded)
             elif content_type == "text/html":
                 html_parts.append(decoded)
     else:
-        payload = msg.get_payload(decode=True)
-        if payload:
+        raw_payload = _payload_as_bytes(msg.get_payload(decode=True))
+        if raw_payload:
             charset = msg.get_content_charset() or "utf-8"
-            try:
-                decoded = payload.decode(charset, errors="replace")
-            except (LookupError, UnicodeDecodeError):
-                decoded = payload.decode("utf-8", errors="replace")
+            decoded = _decode_payload_bytes(raw_payload, charset)
             if msg.get_content_type() == "text/html":
                 html_parts.append(decoded)
             else:
@@ -178,15 +192,15 @@ def extract_attachments(msg: Message) -> list[Attachment]:
         else:
             filename = "attachment"
 
-        payload = part.get_payload(decode=True)
-        if payload is None:
+        raw_payload = _payload_as_bytes(part.get_payload(decode=True))
+        if raw_payload is None:
             continue
 
         attachments.append(
             Attachment(
                 filename=filename,
                 content_type=part.get_content_type(),
-                data=payload,
+                data=raw_payload,
             )
         )
 
@@ -232,12 +246,13 @@ def parse_email_message(raw_bytes: bytes) -> tuple[EmailMessageMeta, str, str, l
     recipients = [addr.strip() for _, addr in email.utils.getaddresses([to_header]) if addr]
 
     date_str = ""
-    if msg.get("Date"):
+    date_header = msg.get("Date")
+    if date_header:
         try:
-            dt = parsedate_to_datetime(msg.get("Date"))
+            dt = parsedate_to_datetime(date_header)
             date_str = dt.isoformat()
         except (ValueError, TypeError):
-            date_str = msg.get("Date", "")
+            date_str = date_header
 
     thread_id = compute_thread_id(msg)
 

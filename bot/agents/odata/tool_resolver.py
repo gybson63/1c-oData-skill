@@ -19,7 +19,7 @@ import json
 import logging
 import re
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from bot.agents.odata.state import ODataQuery, ODataState
@@ -358,11 +358,11 @@ def _extract_json(text: str) -> dict | None:
                 if depth == 0:
                     candidate = text[start : i + 1]
                     try:
-                        return json.loads(candidate)
+                        return cast(dict[Any, Any], json.loads(candidate))
                     except json.JSONDecodeError:
                         break
 
     try:
-        return json.loads(text)
+        return cast(dict[Any, Any], json.loads(text))
     except json.JSONDecodeError:
         return None

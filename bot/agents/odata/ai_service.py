@@ -214,7 +214,7 @@ class AIService:
         content = resp.choices[0].message.content
         if not content:
             raise AIResponseError("AI вернул пустой ответ на шаге форматирования")
-        return content
+        return str(content)
 
     # -- Tool execution --
 

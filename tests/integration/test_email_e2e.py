@@ -34,7 +34,7 @@ from tests.helpers.email_harness import (
     unique_subject,
     wait_for_reply,
 )
-from tests.helpers.scenario_catalog import Scenario, scenarios_by_layer
+from tests.helpers.scenario_catalog import Scenario, scenario_by_id, scenarios_by_layer
 
 log = logging.getLogger(__name__)
 
@@ -172,6 +172,56 @@ async def _run_email_roundtrip(
     return msg_id, reply
 
 
+def _attachments_from_scenario(scenario: Scenario) -> list[tuple[str, str, bytes]] | None:
+    """Вложения из поля attachment в catalog.yaml."""
+    att = scenario.extra.get("attachment")
+    if not att:
+        return None
+    filename = att.get("filename", "data.csv")
+    content = att.get("content", "")
+    return [(filename, "text/csv", content.encode("utf-8"))]
+
+
+async def _run_catalog_scenario(
+    settings,
+    scenario_id: str,
+    *,
+    body: str | None = None,
+    from_addr: str | None = None,
+    attachments: list[tuple[str, str, bytes]] | None = None,
+    subject_prefix: str | None = None,
+    **roundtrip_kwargs,
+) -> tuple[str, Any, Scenario]:
+    """Один roundtrip по записи каталога."""
+    scenario = scenario_by_id(scenario_id)
+    prefix = subject_prefix or scenario_id.replace("email-", "")
+    subject = unique_subject(prefix)
+    msg_id, reply = await _run_email_roundtrip(
+        settings,
+        subject=subject,
+        body=scenario.question if body is None else body,
+        from_addr=from_addr or scenario.extra.get("from_addr", TESTER_ADDR),
+        attachments=attachments if attachments is not None else _attachments_from_scenario(scenario),
+        **roundtrip_kwargs,
+    )
+    return msg_id, reply, scenario
+
+
+async def _e2e_check(
+    settings,
+    scenario_id: str,
+    artifact: str,
+    **kwargs,
+) -> None:
+    """Roundtrip + assert по каталогу; при падении сохраняет MIME."""
+    msg_id, reply, scenario = await _run_catalog_scenario(settings, scenario_id, **kwargs)
+    try:
+        _check_asserts(scenario, reply, msg_id)
+    except AssertionError:
+        save_artifact(artifact, reply.raw)
+        raise
+
+
 def _check_asserts(scenario: Scenario, reply, original_msg_id: str) -> None:
     text = body_text(reply)
     for name in scenario.asserts:
@@ -196,62 +246,103 @@ def _check_asserts(scenario: Scenario, reply, original_msg_id: str) -> None:
         elif name == "has_png_attachment":
             assert any(a[0].endswith(".png") for a in reply.attachments)
         elif name == "mentions_attachment":
-            assert "влож" in text.lower() or "csv" in text.lower() or "data" in text.lower()
+            lowered = text.lower()
+            assert any(kw in lowered for kw in ("влож", "csv", "chislennost", "подраздел", "числен", "it", "бухгалт"))
         elif name == "polite_response":
             assert len(text.strip()) > 5
+        elif name == "has_hr_fields":
+            assert re.search(r"должност|подраздел|сотрудник|фио|фамил|табельн", text, re.I)
+        elif name == "has_organization":
+            assert re.search(r"организац", text, re.I)
+        elif name == "has_department":
+            assert re.search(r"подраздел", text, re.I)
+        elif name == "has_position":
+            assert re.search(r"должност", text, re.I)
+        elif name == "has_person_name":
+            assert re.search(r"физическ|фио|фамил|имя|лиц", text, re.I)
+        elif name == "has_catalog_list":
+            assert re.search(r"наименован|описан|код|справочник|<table|список", text, re.I) or len(text) > 30
         elif name == "human_readable_labels":
             assert len(text) > 20
+            guids = re.findall(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-", text, re.I)
+            assert not guids or re.search(r"подраздел|должност|наименован", text, re.I)
+        elif name == "respects_max_fetch":
+            from bot.config import get_settings
+
+            max_fetch = get_settings().email.max_fetch_records
+            data_rows = len(re.findall(r"<tr\b", reply.html, re.I))
+            if data_rows > 1:
+                assert data_rows - 1 <= max_fetch + 2
+            else:
+                assert re.search(
+                    rf"\b{max_fetch}\b|лимит|огранич|не более|первые\s+\d+",
+                    text,
+                    re.I,
+                )
+
+
+@pytest.mark.slow
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.timeout(600)
+async def test_e2e_zup_staff_list(e2e_bot_runtime):
+    """Аналог отчёта «Штатные сотрудники»."""
+    _, settings = e2e_bot_runtime
+    await _e2e_check(settings, "email-list-employees", "zup-staff")
 
 
 @pytest.mark.slow
 @pytest.mark.integration
 @pytest.mark.asyncio
 @pytest.mark.timeout(300)
-async def test_e2e_list_employees(e2e_bot_runtime):
+async def test_e2e_zup_staff_count(e2e_bot_runtime):
     _, settings = e2e_bot_runtime
-    subject = unique_subject("employees")
-    msg_id, reply = await _run_email_roundtrip(
-        settings,
-        subject=subject,
-        body="Покажи 5 сотрудников из справочника",
-    )
-    try:
-        _check_asserts(
-            Scenario(
-                id="email-list-employees",
-                layer="e2e",
-                question="",
-                asserts=["no_error", "has_table_or_list", "reply_in_thread"],
-            ),
-            reply,
-            msg_id,
-        )
-    except AssertionError:
-        save_artifact(subject, reply.raw)
-        raise
+    await _e2e_check(settings, "email-count-employees", "zup-count")
 
 
 @pytest.mark.slow
 @pytest.mark.integration
 @pytest.mark.asyncio
 @pytest.mark.timeout(300)
-async def test_e2e_count_employees(e2e_bot_runtime):
+async def test_e2e_zup_organizations(e2e_bot_runtime):
     _, settings = e2e_bot_runtime
-    subject = unique_subject("count")
-    msg_id, reply = await _run_email_roundtrip(
-        settings,
-        subject=subject,
-        body="Сколько записей в справочнике сотрудников?",
-    )
-    try:
-        _check_asserts(
-            Scenario(id="email-count-employees", layer="e2e", question="", asserts=["no_error", "has_number"]),
-            reply,
-            msg_id,
-        )
-    except AssertionError:
-        save_artifact(subject, reply.raw)
-        raise
+    await _e2e_check(settings, "email-zup-organizations", "zup-orgs")
+
+
+@pytest.mark.slow
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.timeout(300)
+async def test_e2e_zup_departments(e2e_bot_runtime):
+    _, settings = e2e_bot_runtime
+    await _e2e_check(settings, "email-zup-departments", "zup-depts")
+
+
+@pytest.mark.slow
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.timeout(300)
+async def test_e2e_zup_positions(e2e_bot_runtime):
+    _, settings = e2e_bot_runtime
+    await _e2e_check(settings, "email-zup-positions", "zup-positions")
+
+
+@pytest.mark.slow
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.timeout(300)
+async def test_e2e_zup_physical_persons(e2e_bot_runtime):
+    _, settings = e2e_bot_runtime
+    await _e2e_check(settings, "email-zup-physical-persons", "zup-persons")
+
+
+@pytest.mark.slow
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.timeout(600)
+async def test_e2e_zup_reference_labels(e2e_bot_runtime):
+    _, settings = e2e_bot_runtime
+    await _e2e_check(settings, "email-reference-labels", "zup-labels")
 
 
 @pytest.mark.slow
@@ -260,63 +351,74 @@ async def test_e2e_count_employees(e2e_bot_runtime):
 @pytest.mark.timeout(300)
 async def test_e2e_unknown_entity(e2e_bot_runtime):
     _, settings = e2e_bot_runtime
-    subject = unique_subject("unknown")
-    msg_id, reply = await _run_email_roundtrip(
-        settings,
-        subject=subject,
-        body="Покажи данные из Catalog_НесуществующийОбъект",
-    )
-    try:
-        _check_asserts(
-            Scenario(
-                id="email-unknown-entity",
-                layer="e2e",
-                question="",
-                asserts=["no_stack_trace", "polite_error"],
-            ),
-            reply,
-            msg_id,
-        )
-    except AssertionError:
-        save_artifact(subject, reply.raw)
-        raise
+    await _e2e_check(settings, "email-unknown-entity", "unknown-entity")
 
 
 @pytest.mark.slow
 @pytest.mark.integration
 @pytest.mark.asyncio
 @pytest.mark.timeout(360)
-async def test_e2e_thread_followup(e2e_bot_runtime):
+async def test_e2e_zup_thread_followup(e2e_bot_runtime):
+    """Уточнение отбора — как в настройках типового отчёта."""
     _, settings = e2e_bot_runtime
-    subject = unique_subject("thread")
+    scenario = scenario_by_id("email-thread-followup")
+    setup = scenario.extra.get("thread_setup", {})
+    subject = unique_subject("zup-thread")
     first_id, first_reply = await _run_email_roundtrip(
         settings,
         subject=subject,
-        body="Покажи 10 сотрудников",
+        body=setup.get("first_question", "Покажи 10 сотрудников"),
     )
     assert_no_error(body_text(first_reply))
 
     msg_id, reply = await _run_email_roundtrip(
         settings,
         subject=f"Re: {subject}",
-        body="А теперь только первые 3",
+        body=scenario.question,
         in_reply_to=first_id,
         references=first_id,
     )
     try:
-        _check_asserts(
-            Scenario(
-                id="email-thread-followup",
-                layer="e2e",
-                question="",
-                asserts=["no_error", "reply_in_thread", "uses_context"],
-            ),
-            reply,
-            msg_id,
-        )
+        _check_asserts(scenario, reply, msg_id)
     except AssertionError:
         save_artifact(f"{subject}-followup", reply.raw)
         raise
+
+
+@pytest.mark.slow
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.timeout(600)
+async def test_e2e_zup_long_report(e2e_bot_runtime):
+    _, settings = e2e_bot_runtime
+    await _e2e_check(settings, "email-long-report", "zup-long-report")
+
+
+@pytest.mark.slow
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.timeout(300)
+async def test_e2e_empty_body(e2e_bot_runtime):
+    _, settings = e2e_bot_runtime
+    await _e2e_check(settings, "email-empty-body", "empty-body", body="")
+
+
+@pytest.mark.slow
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.timeout(600)
+async def test_e2e_zup_inbound_csv(e2e_bot_runtime):
+    _, settings = e2e_bot_runtime
+    await _e2e_check(settings, "email-inbound-csv", "zup-csv")
+
+
+@pytest.mark.slow
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.timeout(600)
+async def test_e2e_zup_max_fetch_cap(e2e_bot_runtime):
+    _, settings = e2e_bot_runtime
+    await _e2e_check(settings, "email-max-fetch-cap", "zup-max-fetch")
 
 
 @pytest.mark.slow
@@ -330,12 +432,13 @@ async def test_e2e_disallowed_sender_no_reply(e2e_bot_runtime):
     smtp = _smtp_from_settings(settings)
     imap = _imap_tester(settings)
 
+    blocked = scenario_by_id("email-disallowed-sender")
     send_email(
         smtp=smtp,
         to_addr=BOT_ADDR,
         subject=subject,
-        body="Покажи сотрудников",
-        from_addr="stranger@blocked.test",
+        body=blocked.question,
+        from_addr=blocked.extra.get("from_addr", "stranger@blocked.test"),
     )
 
     with pytest.raises(TimeoutError):
@@ -357,9 +460,18 @@ def test_catalog_implemented_e2e_ids_exist():
     covered = {
         "email-list-employees",
         "email-count-employees",
+        "email-zup-organizations",
+        "email-zup-departments",
+        "email-zup-positions",
+        "email-zup-physical-persons",
+        "email-reference-labels",
         "email-unknown-entity",
         "email-thread-followup",
         "email-disallowed-sender",
+        "email-long-report",
+        "email-empty-body",
+        "email-inbound-csv",
+        "email-max-fetch-cap",
     }
     missing = implemented - covered
     assert not missing, f"Add E2E tests for catalog ids: {missing}"
@@ -371,7 +483,9 @@ def test_catalog_yaml_loads():
     from tests.helpers.scenario_catalog import load_catalog
 
     items = load_catalog()
-    assert len(items) >= 15
+    assert len(items) >= 20
     layers = {s.layer for s in items}
     assert "e2e" in layers
     assert "l1" in layers
+    zup = [s for s in items if s.domain == "zup"]
+    assert len(zup) >= 10

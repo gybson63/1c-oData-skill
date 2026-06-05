@@ -80,7 +80,7 @@ def merge_dataframes(
 def aggregate_dataframe(
     df: pd.DataFrame,
     group_by: list[str] | None,
-    agg: dict[str, str] | None,
+    agg: Mapping[str, str] | None,
 ) -> pd.DataFrame:
     """Сгруппировать и агрегировать DataFrame."""
     if df.empty or not group_by or not agg:

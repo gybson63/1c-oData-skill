@@ -44,7 +44,7 @@ from collections import defaultdict
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -242,19 +242,19 @@ class MetricsRegistry:
         total_cost = 0.0
         total_cost_rub = 0.0
         total_requests = 0
-        for model, entry in sorted(self._ai_usage.items()):
+        for model, usage_entry in sorted(self._ai_usage.items()):
             ai_report[model] = {
-                "requests": entry.requests,
-                "input_tokens": entry.input_tokens,
-                "output_tokens": entry.output_tokens,
-                "cost_usd": round(entry.total_cost_usd, 6),
-                "cost_rub": round(entry.total_cost_rub, 6),
+                "requests": usage_entry.requests,
+                "input_tokens": usage_entry.input_tokens,
+                "output_tokens": usage_entry.output_tokens,
+                "cost_usd": round(usage_entry.total_cost_usd, 6),
+                "cost_rub": round(usage_entry.total_cost_rub, 6),
             }
-            total_input += entry.input_tokens
-            total_output += entry.output_tokens
-            total_cost += entry.total_cost_usd
-            total_cost_rub += entry.total_cost_rub
-            total_requests += entry.requests
+            total_input += usage_entry.input_tokens
+            total_output += usage_entry.output_tokens
+            total_cost += usage_entry.total_cost_usd
+            total_cost_rub += usage_entry.total_cost_rub
+            total_requests += usage_entry.requests
 
         return {
             "uptime_seconds": round(uptime, 1),
@@ -736,9 +736,7 @@ class CostAnalyzer:
         if interval == "week":
             # Начало недели (понедельник)
             days_since_monday = dt.weekday()
-            return (dt - __import__("datetime").timedelta(days=days_since_monday)).replace(
-                hour=0, minute=0, second=0, microsecond=0
-            )
+            return (dt - timedelta(days=days_since_monday)).replace(hour=0, minute=0, second=0, microsecond=0)
         if interval == "day":
             return dt.replace(hour=0, minute=0, second=0, microsecond=0)
         if interval in ("12h", "6h"):

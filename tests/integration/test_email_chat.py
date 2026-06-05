@@ -155,6 +155,25 @@ async def test_skip_formatter_raw_text(email_chat):
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_empty_body_polite_response(email_chat):
+    chat, agent, formatter = email_chat
+    agent.process_message.return_value = AgentProcessResult(
+        text="Пожалуйста, опишите ваш запрос.",
+        history=[
+            {"role": "user", "content": ""},
+            {"role": "assistant", "content": "Пожалуйста, опишите ваш запрос."},
+        ],
+    )
+
+    outbound = await chat.process_inbound(_email_inbound(text=""))
+
+    agent.process_message.assert_awaited_once()
+    formatter.format_response.assert_awaited()
+    assert len(outbound.text.strip()) > 5
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_token_footer_in_attachment_when_long(email_chat):
     chat, agent, _ = email_chat
     inbound = _email_inbound()

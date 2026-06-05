@@ -150,7 +150,7 @@ def render_html(
     else:
         raise ValueError(f"Неподдерживаемый тип графика: {chart.type}")
 
-    return fig.to_html(include_plotlyjs="cdn", full_html=True)
+    return str(fig.to_html(include_plotlyjs="cdn", full_html=True))
 
 
 def chart_spec_from_dict(data: dict[str, Any]) -> ChartSpec:

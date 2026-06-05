@@ -20,6 +20,8 @@ class Scenario:
     status: str = "planned"
     owner: str = ""
     notes: str = ""
+    domain: str = ""
+    report_analog: str = ""
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -30,7 +32,7 @@ def load_catalog(path: Path | None = None) -> list[Scenario]:
     items = raw.get("scenarios", [])
     result: list[Scenario] = []
     for item in items:
-        known = {"id", "layer", "question", "asserts", "status", "owner", "notes"}
+        known = {"id", "layer", "question", "asserts", "status", "owner", "notes", "domain", "report_analog"}
         extra = {k: v for k, v in item.items() if k not in known}
         result.append(
             Scenario(
@@ -41,6 +43,8 @@ def load_catalog(path: Path | None = None) -> list[Scenario]:
                 status=item.get("status", "planned"),
                 owner=item.get("owner", ""),
                 notes=item.get("notes", ""),
+                domain=item.get("domain", ""),
+                report_analog=item.get("report_analog", ""),
                 extra=extra,
             )
         )
@@ -54,3 +58,11 @@ def scenarios_by_layer(layer: str, *, status: str | None = "implemented") -> lis
     if status is not None:
         out = [s for s in out if s.status == status]
     return out
+
+
+def scenario_by_id(scenario_id: str, *, path: Path | None = None) -> Scenario:
+    """Найти сценарий по id; KeyError если не найден."""
+    for item in load_catalog(path):
+        if item.id == scenario_id:
+            return item
+    raise KeyError(scenario_id)
