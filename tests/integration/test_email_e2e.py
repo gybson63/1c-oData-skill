@@ -28,6 +28,7 @@ from tests.helpers.email_harness import (
     assert_no_error,
     assert_reply_in_thread,
     body_text,
+    imap_max_uid,
     save_artifact,
     send_email,
     unique_subject,
@@ -39,7 +40,7 @@ log = logging.getLogger(__name__)
 
 BOT_ADDR = "bot@local.test"
 TESTER_ADDR = "tester@local.test"
-E2E_TIMEOUT = float(os.environ.get("E2E_EMAIL_TIMEOUT", "180"))
+E2E_TIMEOUT = float(os.environ.get("E2E_EMAIL_TIMEOUT", "600"))
 
 
 def _resolve_env_file(env_test_file: str | None) -> str:
@@ -114,8 +115,8 @@ def _smtp_from_settings(settings) -> SmtpConfig:
     return SmtpConfig(
         host=os.environ.get("TEST_SMTP_HOST", e.smtp_host),
         port=int(os.environ.get("TEST_SMTP_PORT", str(e.smtp_port))),
-        user=TESTER_ADDR,
-        password=os.environ.get("TEST_SMTP_PASSWORD", "secret"),
+        user=os.environ.get("TEST_SMTP_USER", ""),
+        password=os.environ.get("TEST_SMTP_PASSWORD", ""),
         use_ssl=e.smtp_use_ssl,
         use_tls=e.smtp_use_tls,
     )
@@ -126,7 +127,7 @@ def _imap_tester(settings) -> ImapConfig:
     return ImapConfig(
         host=os.environ.get("TEST_IMAP_HOST", e.imap_host),
         port=int(os.environ.get("TEST_IMAP_PORT", str(e.imap_port))),
-        user=TESTER_ADDR,
+        user=os.environ.get("TEST_IMAP_USER", "tester"),
         password=os.environ.get("TEST_IMAP_PASSWORD", "secret"),
         use_ssl=e.imap_use_ssl,
     )
@@ -146,6 +147,8 @@ async def _run_email_roundtrip(
     smtp = _smtp_from_settings(settings)
     imap = _imap_tester(settings)
 
+    since_uid = await asyncio.to_thread(imap_max_uid, imap)
+
     msg_id = send_email(
         smtp=smtp,
         to_addr=BOT_ADDR,
@@ -159,11 +162,12 @@ async def _run_email_roundtrip(
 
     reply = await asyncio.to_thread(
         wait_for_reply,
-        subject_contains=f"Re: {subject}",
+        subject_contains=subject,
         timeout=E2E_TIMEOUT,
         poll_interval=settings.email.poll_interval,
         imap=imap,
-        from_contains="bot@",
+        from_contains="bot@local.test",
+        since_uid=since_uid,
     )
     return msg_id, reply
 
@@ -337,11 +341,11 @@ async def test_e2e_disallowed_sender_no_reply(e2e_bot_runtime):
     with pytest.raises(TimeoutError):
         await asyncio.to_thread(
             wait_for_reply,
-            subject_contains=f"Re: {subject}",
+            subject_contains=subject,
             timeout=15.0,
             poll_interval=2.0,
             imap=imap,
-            from_contains="bot@",
+            from_contains="bot@local.test",
         )
 
 

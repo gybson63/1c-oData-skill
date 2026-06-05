@@ -220,7 +220,7 @@ class EmailTransport:
             original_subject=original_meta.subject,
         )
 
-        subject = outbound.subject or build_reply_subject(original_meta.subject)
+        subject = build_reply_subject(original_meta.subject or outbound.subject)
 
         if outbound.attachments:
             msg = MIMEMultipart("mixed")

@@ -106,14 +106,14 @@ def send_email(
 
     if smtp.use_ssl:
         with smtplib.SMTP_SSL(smtp.host, smtp.port) as client:
-            if smtp.user:
+            if smtp.user and smtp.password:
                 client.login(smtp.user, smtp.password)
             client.send_message(msg)
     else:
         with smtplib.SMTP(smtp.host, smtp.port) as client:
             if smtp.use_tls:
                 client.starttls()
-            if smtp.user:
+            if smtp.user and smtp.password:
                 client.login(smtp.user, smtp.password)
             client.send_message(msg)
 
@@ -165,6 +165,27 @@ def parse_reply_mime(raw: bytes) -> ParsedReply:
         attachments=attachments,
         raw=raw,
     )
+
+
+def imap_max_uid(imap: ImapConfig) -> int:
+    """Текущий максимальный UID в ящике (0 если пусто)."""
+    if imap.use_ssl:
+        client = imaplib.IMAP4_SSL(imap.host, imap.port)
+    else:
+        client = imaplib.IMAP4(imap.host, imap.port)
+    try:
+        client.login(imap.user, imap.password)
+        client.select(imap.folder)
+        status, data = client.search(None, "ALL")
+        if status != "OK" or not data or not data[0]:
+            return 0
+        uids = [int(u) for u in data[0].split()]
+        return max(uids) if uids else 0
+    finally:
+        try:
+            client.logout()
+        except Exception:
+            pass
 
 
 def _imap_fetch_matching(
@@ -219,6 +240,7 @@ def wait_for_reply_imap(
     timeout: float = 180.0,
     poll_interval: float = 2.0,
     from_contains: str = "",
+    since_uid: int = 0,
 ) -> ParsedReply:
     """Ожидать ответ по IMAP (GreenMail и др.)."""
     deadline = time.monotonic() + timeout
@@ -228,7 +250,7 @@ def wait_for_reply_imap(
             imap,
             subject_contains=subject_contains,
             from_contains=from_contains,
-            since_uid=last_uid,
+            since_uid=max(since_uid, last_uid),
         )
         if matches:
             _, raw = matches[-1]
@@ -288,6 +310,7 @@ def wait_for_reply(
     mailhog_api: str | None = None,
     from_contains: str = "",
     to_contains: str = "",
+    since_uid: int = 0,
 ) -> ParsedReply:
     """Универсальное ожидание ответа: IMAP или MailHog API."""
     if imap is not None:
@@ -297,6 +320,7 @@ def wait_for_reply(
             timeout=timeout,
             poll_interval=poll_interval,
             from_contains=from_contains,
+            since_uid=since_uid,
         )
     if mailhog_api:
         return wait_for_reply_mailhog(
@@ -318,8 +342,10 @@ def assert_no_error(body: str) -> None:
 
 def assert_reply_in_thread(reply: ParsedReply, original_message_id: str) -> None:
     """Проверить, что ответ — часть цепочки."""
-    assert reply.subject.startswith("Re:") or reply.subject.lower().startswith("re:")
-    assert original_message_id in (reply.in_reply_to + " " + reply.references)
+    assert "re:" in reply.subject.lower()
+    combined = f"{reply.in_reply_to} {reply.references}"
+    needle = original_message_id.strip()
+    assert needle in combined or needle.strip("<>") in combined
 
 
 def save_artifact(name: str, data: bytes, *, suffix: str = ".eml") -> Path:

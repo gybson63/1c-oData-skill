@@ -38,11 +38,11 @@ def email_settings() -> EmailSettings:
     return EmailSettings(
         imap_host="localhost",
         imap_port=3143,
-        imap_user="bot@local.test",
+        imap_user="bot",
         imap_password="secret",
         smtp_host="localhost",
         smtp_port=3025,
-        smtp_user="bot@local.test",
+        smtp_user="bot",
         smtp_password="secret",
         smtp_use_ssl=False,
         smtp_use_tls=False,

@@ -122,7 +122,7 @@ def mail_smtp() -> SmtpConfig:
     return SmtpConfig(
         host=os.environ.get("TEST_SMTP_HOST", "localhost"),
         port=int(os.environ.get("TEST_SMTP_PORT", "3025")),
-        user=os.environ.get("TEST_SMTP_USER", "tester@local.test"),
+        user=os.environ.get("TEST_SMTP_USER", ""),
         password=os.environ.get("TEST_SMTP_PASSWORD", "secret"),
     )
 
@@ -133,7 +133,7 @@ def mail_imap() -> ImapConfig:
     return ImapConfig(
         host=os.environ.get("TEST_IMAP_HOST", "localhost"),
         port=int(os.environ.get("TEST_IMAP_PORT", "3143")),
-        user=os.environ.get("TEST_IMAP_USER", "tester@local.test"),
+        user=os.environ.get("TEST_IMAP_USER", "tester"),
         password=os.environ.get("TEST_IMAP_PASSWORD", "secret"),
     )
 
@@ -168,12 +168,12 @@ def email_test_env_json(tmp_path) -> str:
                     "enabled": True,
                     "imap_host": "localhost",
                     "imap_port": 3143,
-                    "imap_user": "bot@local.test",
+                    "imap_user": "bot",
                     "imap_password": "secret",
                     "imap_use_ssl": False,
                     "smtp_host": "localhost",
                     "smtp_port": 3025,
-                    "smtp_user": "bot@local.test",
+                    "smtp_user": "bot",
                     "smtp_password": "secret",
                     "smtp_use_ssl": False,
                     "smtp_use_tls": False,

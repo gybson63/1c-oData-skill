@@ -18,6 +18,7 @@ services:
     environment:
       GREENMAIL_OPTS: >-
         -Dgreenmail.setup.test.all
+        -Dgreenmail.hostname=0.0.0.0
         -Dgreenmail.users=bot:secret@local.test,tester:secret@local.test
 
   bot:

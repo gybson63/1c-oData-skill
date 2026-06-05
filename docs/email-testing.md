@@ -26,8 +26,10 @@ docker compose -f docker-compose.test.yml up -d mail
 
 Пользователи (пароль `secret`):
 
-- `bot@local.test` — ящик бота (IMAP/SMTP)
-- `tester@local.test` — отправитель тестов
+- `bot@local.test` — ящик бота (IMAP/SMTP), логин IMAP/SMTP: `bot`
+- `tester@local.test` — отправитель тестов, логин IMAP: `tester`
+
+GreenMail в Docker слушает `0.0.0.0` (см. `GREENMAIL_OPTS` в `docker-compose.test.yml`).
 
 ## Конфигурация
 
