@@ -57,6 +57,14 @@ class VisualizationDecision(BaseModel):
     source: Literal["rules", "ai"] = "rules"
 
 
+class RequestBrief(BaseModel):
+    """Краткая формулировка запроса для заголовка ответа."""
+
+    headline: str
+    emoji: str = "📋"
+    source: Literal["rules", "ai"] = "rules"
+
+
 class AnalyticsPlan(BaseModel):
     """План analytics-обработки от AI Step 1."""
 

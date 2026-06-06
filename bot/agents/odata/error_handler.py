@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 
 from bot.messages import AgentProcessResult
 from bot.utils import esc_html
@@ -25,15 +26,45 @@ log = logging.getLogger(__name__)
 # Маппинг кодов ошибок OData 1С на человекопонятные сообщения
 _ODATA_ERROR_CODES: dict[str, str] = {
     "0": "Параметр не поддерживается (возможна опечатка в имени параметра).",
-    "6": "Метод не найден — проверьте имя виртуальной таблицы (слитно, без подчёркивания).",
+    "6": "Метод или сегмент пути не найден — проверьте entity, виртуальную таблицу и имена полей.",
     "8": "Тип сущности не найден — проверьте имя объекта (префикс_Имя).",
     "9": "Экземпляр сущности не найден — несуществующий GUID или ссылка.",
     "14": "Ошибка разбора $filter — проверьте синтаксис фильтра.",
 }
 
+_SEGMENT_RE = re.compile(r"Сегмент пути\s+(\S+)\s+не найден", re.I)
+_ZUP_DEPT_ALIASES = frozenset({"Подразделение", "Подразделение_Key"})
+
 
 class QueryError(Exception):
     """Ошибка разбора запроса (не удалось извлечь OData JSON из ответа AI)."""
+
+
+def _refine_odata_code6_hint(code: str, message_value: str) -> str:
+    """Уточнить подсказку для кода 6 по тексту ошибки 1С."""
+    if code != "6":
+        return _ODATA_ERROR_CODES.get(code, message_value)
+
+    lower = message_value.lower()
+    if "лишние сегменты" in lower:
+        return (
+            "Запрос отклонён — часто это $expand или навигация в $select (Nav/Description) "
+            "на виртуальной таблице (SliceLast(), Balance()). "
+            "Используйте поля *_Key; подписи подставляются отдельно."
+        )
+
+    seg_match = _SEGMENT_RE.search(message_value)
+    if seg_match:
+        seg = seg_match.group(1)
+        if seg in _ZUP_DEPT_ALIASES:
+            return (
+                f"Поле «{seg}» не найдено — в ЗУП используйте ПодразделениеОрганизации / ПодразделениеОрганизации_Key."
+            )
+        return (
+            f"Сегмент «{seg}» не найден — проверьте имя поля, навигационного свойства или виртуальной таблицы в entity."
+        )
+
+    return _ODATA_ERROR_CODES["6"]
 
 
 def parse_odata_error_message(error: ODataError) -> str:
@@ -53,6 +84,9 @@ def parse_odata_error_message(error: ODataError) -> str:
                 message_value = message_value.get("value", "")
             hint = _ODATA_ERROR_CODES.get(code)
             if hint:
+                if message_value and code == "6":
+                    detail = _refine_odata_code6_hint(code, str(message_value))
+                    return f"{detail} ({message_value})"
                 return f"{hint} ({message_value})" if message_value else hint
             if message_value:
                 return str(message_value)
@@ -97,7 +131,11 @@ class ErrorHandler:
             log.error("AI error: %s", exc)
             return f"🤖 <b>Ошибка AI-сервиса:</b> {esc_html(str(exc))}"
         if isinstance(exc, QueryError):
-            return f"⚠️ {esc_html(str(exc))}"
+            msg = str(exc)
+            if "<pre>" in msg:
+                prefix, _, tail = msg.partition("\n\n")
+                return f"⚠️ {esc_html(prefix)}\n\n{tail}"
+            return f"⚠️ {esc_html(msg)}"
 
         log.exception("Unexpected error in ODataAgent")
         return "💥 Произошла непредвиденная ошибка. Попробуйте позже."

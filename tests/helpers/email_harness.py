@@ -338,6 +338,9 @@ def assert_no_error(body: str) -> None:
     lowered = body.lower()
     assert "traceback" not in lowered
     assert "непредвиденная ошибка" not in lowered or "⚠️" not in body
+    assert "разобрать запрос" not in lowered
+    assert "переформулировать" not in lowered
+    assert "ошибка odata" not in lowered
 
 
 def assert_reply_in_thread(reply: ParsedReply, original_message_id: str) -> None:

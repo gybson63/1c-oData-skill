@@ -9,6 +9,7 @@ from bot.agents.odata.state import ODataState
 from bot.agents.odata.tool_resolver import (
     AutoSearchResolver,
     TextToolCallResolver,
+    _extract_json,
     _try_apply_step1_content,
     _user_wants_chart,
 )
@@ -59,3 +60,14 @@ def test_try_apply_step1_content_analytics():
     assert result is None
     assert state.analytics_plan is not None
     assert state.analytics_plan.queries[0].entity == "Catalog_Сотрудники"
+
+
+def test_extract_json_from_array():
+    parsed = _extract_json('[{"entity":"Catalog_X","top":5}]')
+    assert parsed == {"entity": "Catalog_X", "top": 5}
+
+
+def test_extract_json_skips_invalid_block_and_parses_next():
+    text = 'noise {"broken": } more {"entity":"Catalog_Y","top":3}'
+    parsed = _extract_json(text)
+    assert parsed == {"entity": "Catalog_Y", "top": 3}

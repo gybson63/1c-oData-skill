@@ -11,6 +11,7 @@ import pytest
 from bot.agents.odata.analytics_executor import AnalyticsResult
 from bot.agents.odata.analytics_models import AnalyticsPlan, AnalyticsSubQuery, ChartSpec
 from bot.agents.odata.pipeline import ODataPipeline
+from bot.agents.odata.request_brief_advisor import brief_from_rules
 from bot.agents.odata.state import ODataState
 
 
@@ -48,11 +49,13 @@ async def test_step_analytics_with_chart():
     pipeline_mod.AnalyticsExecutor = MagicMock(return_value=mock_analytics)
 
     state = ODataState(user_text="график", analytics_plan=plan)
+    state.request_brief = brief_from_rules("график")
     try:
-        result = await pipeline._step_analytics(state)
+        result = pipeline._finalize_answer(await pipeline._step_analytics(state))
     finally:
         pipeline_mod.AnalyticsExecutor = original
 
+    assert "график" in result.answer_html.lower()
     assert "📊" in result.answer_html
     assert len(result.attachments) == 1
     assert result.attachments[0].content_type == "image/png"
@@ -124,12 +127,14 @@ async def test_step_analytics_uses_normalized_plan_for_chart():
     original = pipeline_mod.AnalyticsExecutor
     pipeline_mod.AnalyticsExecutor = MagicMock(return_value=mock_analytics)
 
-    state = ODataState(user_text="график", analytics_plan=raw_plan)
+    state = ODataState(user_text="график по организациям", analytics_plan=raw_plan)
+    state.request_brief = brief_from_rules("график по организациям")
     try:
-        result = await pipeline._step_analytics(state)
+        result = pipeline._finalize_answer(await pipeline._step_analytics(state))
     finally:
         pipeline_mod.AnalyticsExecutor = original
 
+    assert "организац" in result.answer_html.lower()
     assert state.analytics_plan.chart is not None
     assert state.analytics_plan.chart.x == "ГоловнаяОрганизация"
     assert len(result.attachments) == 1

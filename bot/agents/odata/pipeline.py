@@ -26,14 +26,26 @@ from openai import BadRequestError
 
 from bot.agents.odata.ai_service import AIService
 from bot.agents.odata.analytics_executor import AnalyticsExecutor
+from bot.agents.odata.attachment_csv import try_handle_csv_attachment
 from bot.agents.odata.chart_renderer import render_html, render_png
+from bot.agents.odata.config_hint_loader import format_config_hint_block
 from bot.agents.odata.error_handler import QueryError
+from bot.agents.odata.parse_failure import (
+    build_parse_failure_message,
+    classify_step1_failure,
+    find_latest_step1_artifact,
+    journal_parse_failure,
+)
 from bot.agents.odata.prompts import ODATA_REFERENCE, STEP1_SYSTEM
 from bot.agents.odata.query_executor import QueryExecutor
 from bot.agents.odata.query_validator import QueryValidator
+from bot.agents.odata.request_brief_advisor import RequestBriefAdvisor, brief_from_rules, extract_current_query
+from bot.agents.odata.request_guard import check_request_allowed, guard_limits_from_settings
+from bot.agents.odata.response_headline import apply_request_headline
 from bot.agents.odata.state import ODataState
 from bot.agents.odata.tool_resolver import (
     AutoSearchResolver,
+    DsmlToolCallResolver,
     InlineJsonResolver,
     NativeFunctionCallResolver,
     TextToolCallResolver,
@@ -63,10 +75,10 @@ class ODataPipeline:
         tools: list[dict],
         model: str,
         history_max_turns: int = 10,
-        default_top: int = 20,
         max_analytics_records: int = 500,
         max_analytics_joins: int = 3,
         chart_max_categories: int = 30,
+        config_hint_path: str | None = None,
     ) -> None:
         self._ai = ai
         self._executor = executor
@@ -76,11 +88,12 @@ class ODataPipeline:
         self._tools = tools
         self._model = model
         self._history_max_turns = history_max_turns
-        self._default_top = default_top
         self._max_analytics_records = max_analytics_records
         self._max_analytics_joins = max_analytics_joins
         self._chart_max_categories = chart_max_categories
+        self._config_hint_path = config_hint_path
         self._tools_supported: bool = True
+        self._request_brief = RequestBriefAdvisor()
 
         # Цепочка резолверов tool calls
         self._tool_chain: ToolResolver = self._build_tool_chain()
@@ -88,12 +101,13 @@ class ODataPipeline:
     def _build_tool_chain(self) -> ToolResolver:
         """Построить цепочку резолверов (Chain of Responsibility)."""
         return NativeFunctionCallResolver(
-            InlineJsonResolver(TextToolCallResolver(AutoSearchResolver(metadata=self._metadata)))
+            InlineJsonResolver(DsmlToolCallResolver(TextToolCallResolver(AutoSearchResolver(metadata=self._metadata))))
         )
 
     def build_step1_prompt(self) -> str:
         """Построить системный промпт для Шага 1."""
         base = STEP1_SYSTEM.format(metadata=self._metadata.format_entity_list())
+        base += format_config_hint_block(self._config_hint_path)
         if not self._tools_supported:
             ref_lines = [
                 "\n\n--- СПРАВОЧНИК ODATA (инструменты недоступны через function calling, используй текстовый вызов) ---",
@@ -132,12 +146,40 @@ class ODataPipeline:
             tools_supported=self._tools_supported,
         )
 
+        guard = check_request_allowed(user_text)
+        if guard.blocked:
+            log.info("Request blocked by guard: %s", guard.reason)
+            state.request_brief = brief_from_rules(extract_current_query(user_text))
+            state.answer_html = guard.message_html(limits=guard_limits_from_settings())
+            state = self._finalize_answer(state)
+            state.history = state.finalize_history(
+                self._history_max_turns,
+                assistant_content=state.answer_html,
+            )
+            return state
+
+        csv_state = await try_handle_csv_attachment(state, self._ai)
+        if csv_state is not None:
+            return self._finalize_answer(csv_state)
+
+        state.request_brief = await self._request_brief.advise(
+            self._ai,
+            user_query=state.user_text,
+            history=state.history,
+            chat_id=state.chat_id,
+        )
+        log.info(
+            "RequestBrief: %s (source=%s)",
+            state.request_brief.headline[:80],
+            state.request_brief.source,
+        )
+
         # Шаг 1: AI формирует OData-запрос
         await self._step_build_query(state)
 
         # Analytics-ветка (multi-query, join, графики)
         if state.analytics_plan:
-            return await self._step_analytics(state)
+            return self._finalize_answer(await self._step_analytics(state))
 
         # Проверка entity
         if not state.query or not state.query.entity:
@@ -145,7 +187,7 @@ class ODataPipeline:
 
         # Проверка count-запроса
         if state.query.count:
-            return await self._step_count_query(state)
+            return self._finalize_answer(await self._step_count_query(state))
 
         # Шаг 2: Валидация
         await self._step_validate(state)
@@ -159,6 +201,11 @@ class ODataPipeline:
         # Финализация истории
         state.history = state.finalize_history(self._history_max_turns)
 
+        return self._finalize_answer(state)
+
+    def _finalize_answer(self, state: ODataState) -> ODataState:
+        """Добавить заголовок, соотнесённый с запросом пользователя."""
+        state.answer_html = apply_request_headline(state.answer_html, state.request_brief)
         return state
 
     # -- Pipeline steps (potential LangGraph nodes) --
@@ -205,23 +252,11 @@ class ODataPipeline:
         state.ai_response_content = msg.content or ""
         log.info("STEP1 final content (len=%d): %s", len(state.ai_response_content), state.ai_response_content[:1000])
 
-        from bot.agents.odata.query_parser import apply_step1_dict
+        from bot.agents.odata.query_parser import get_last_apply_failure
         from bot.agents.odata.tool_resolver import _extract_json
 
-        query_dict = _extract_json(state.ai_response_content)
-        if query_dict and apply_step1_dict(state, query_dict):
-            if state.analytics_plan:
-                log.info(
-                    "STEP1 parsed analytics: queries=%d joins=%d chart=%s",
-                    len(state.analytics_plan.queries),
-                    len(state.analytics_plan.joins),
-                    state.analytics_plan.chart.type if state.analytics_plan.chart else None,
-                )
-            elif state.query:
-                log.info(
-                    "STEP1 parsed query: %s",
-                    json.dumps(query_dict, ensure_ascii=False)[:500],
-                )
+        if self._try_apply_step1_content(state, state.ai_response_content):
+            self._log_step1_success(state)
             return
 
         # Цепочка резолверов (inline tool call, text tool call, auto-search)
@@ -235,14 +270,85 @@ class ODataPipeline:
             )
             return
 
-        if not state.query:
-            log.warning("Не удалось извлечь JSON из ответа AI. Полный ответ:\n%s", state.ai_response_content)
-            raise QueryError(
-                f"Не удалось разобрать запрос. Попробуйте переформулировать.\n\n"
-                f"<pre>{esc_html(state.ai_response_content[:500])}</pre>"
-            )
+        if state.query:
+            log.info("STEP1 resolved query: entity=%s filter=%s", state.query.entity, state.query.filter_expr)
+            return
 
-        log.info("STEP1 resolved query: entity=%s filter=%s", state.query.entity, state.query.filter_expr)
+        # Retry при пустом ответе AI
+        if not (state.ai_response_content or "").strip():
+            await self._retry_step1_json(state, "Предыдущий ответ был пустым. Верни ТОЛЬКО JSON.")
+            if state.analytics_plan or state.query:
+                return
+
+        # Финальный retry: явная просьба вернуть только JSON
+        await self._retry_step1_json(
+            state,
+            f"Предыдущий ответ не был валидным JSON для OData/analytics.\nПострой JSON для запроса: {state.user_text}",
+        )
+        if state.analytics_plan or state.query:
+            return
+
+        query_dict = _extract_json(state.ai_response_content or "")
+        reason = classify_step1_failure(
+            state.ai_response_content,
+            query_dict=query_dict,
+            apply_failed_reason=get_last_apply_failure(),
+        )
+        log.warning("Не удалось извлечь JSON из ответа AI. Полный ответ:\n%s", state.ai_response_content)
+        journal_parse_failure(
+            user_query=state.user_text,
+            ai_response=state.ai_response_content,
+            reason=reason,
+            chat_id=state.chat_id,
+            step1_artifact=find_latest_step1_artifact(),
+        )
+        raise QueryError(build_parse_failure_message(state.ai_response_content))
+
+    async def _retry_step1_json(self, state: ODataState, intro: str) -> None:
+        """Повтор Step1 с просьбой вернуть только JSON."""
+        from bot.agents.odata.tool_resolver import RETRY_JSON_HINT
+
+        retry_msg = f"{intro}\n{RETRY_JSON_HINT}"
+        state.ai_messages.append({"role": "assistant", "content": state.ai_response_content or ""})
+        state.ai_messages.append({"role": "user", "content": retry_msg})
+        if self._rate_limiter:
+            await self._rate_limiter.wait()
+        try:
+            resp = await self._ai.step1_call_ai(state.ai_messages, use_tools=False, chat_id=state.chat_id)
+            state.ai_response_content = resp.choices[0].message.content or ""
+            log.info(
+                "STEP1 retry content (len=%d): %s",
+                len(state.ai_response_content),
+                state.ai_response_content[:1000],
+            )
+            if self._try_apply_step1_content(state, state.ai_response_content):
+                self._log_step1_success(state)
+                return
+            state.query = await self._tool_chain.resolve(state, self._ai)
+        except Exception as exc:
+            log.warning("STEP1 retry failed: %s", exc)
+
+    def _try_apply_step1_content(self, state: ODataState, content: str) -> bool:
+        from bot.agents.odata.query_parser import apply_step1_dict
+        from bot.agents.odata.tool_resolver import _extract_json
+
+        query_dict = _extract_json(content)
+        return bool(query_dict and apply_step1_dict(state, query_dict))
+
+    def _log_step1_success(self, state: ODataState) -> None:
+        if state.analytics_plan:
+            log.info(
+                "STEP1 parsed analytics: queries=%d joins=%d chart=%s",
+                len(state.analytics_plan.queries),
+                len(state.analytics_plan.joins),
+                state.analytics_plan.chart.type if state.analytics_plan.chart else None,
+            )
+        elif state.query:
+            log.info(
+                "STEP1 parsed query: entity=%s filter=%s",
+                state.query.entity,
+                state.query.filter_expr,
+            )
 
     async def _step_validate(self, state: ODataState) -> None:
         """Шаг 2: Валидация OData-запроса по метаданным."""
@@ -304,7 +410,7 @@ class ODataPipeline:
             filter_expr=q.filter_expr,
         )
 
-        answer = f"<b>📊 Количество</b> <i>{esc_html(q.entity)}</i>: <code>{total}</code>"
+        answer = f"<i>{esc_html(q.entity)}</i>: <code>{total}</code>"
         if q.explanation:
             answer += f"\n<i>{esc_html(q.explanation)}</i>"
 
@@ -366,12 +472,7 @@ class ODataPipeline:
             plan = plan.model_copy(update={"chart": None})
         state.analytics_plan = plan
 
-        chart_title = (
-            (viz.chart.title if viz.chart and viz.chart.title else None)
-            or (plan.chart.title if plan.chart and plan.chart.title else None)
-            or "Аналитика"
-        )
-        parts = [f"<b>📊 {esc_html(chart_title)}</b>"]
+        parts: list[str] = []
         if plan.explanation:
             parts.append(f"<i>{esc_html(plan.explanation)}</i>")
         if viz.reason and viz.source == "ai":

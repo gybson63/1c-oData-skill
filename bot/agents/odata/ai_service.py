@@ -16,7 +16,12 @@ from typing import Any
 
 from openai import AsyncOpenAI, BadRequestError
 
-from bot.agents.odata.prompts import ODATA_REFERENCE, STEP2_SYSTEM, VISUALIZATION_ADVISOR_SYSTEM
+from bot.agents.odata.prompts import (
+    ODATA_REFERENCE,
+    REQUEST_BRIEF_SYSTEM,
+    STEP2_SYSTEM,
+    VISUALIZATION_ADVISOR_SYSTEM,
+)
 from bot.config import get_settings
 from bot_lib.ai_retry import chat_completions_with_retry
 from bot_lib.exceptions import AIError, AIResponseError
@@ -134,6 +139,46 @@ class AIService:
             )
 
         return msg1
+
+    # -- Request brief (subagent) --
+
+    async def request_brief(
+        self,
+        messages: list[dict],
+        chat_id: int | None = None,
+    ) -> str:
+        """Короткий вызов AI: краткая формулировка запроса для заголовка ответа."""
+        from bot.metrics import metrics, save_provider_response, track_time
+
+        if messages and messages[0].get("role") != "system":
+            messages = [{"role": "system", "content": REQUEST_BRIEF_SYSTEM}, *messages]
+
+        if self._rate_limiter:
+            await self._rate_limiter.wait()
+
+        metrics.increment("ai_requests_brief")
+        async with track_time("ai_brief"):
+            try:
+                resp = await self._chat_completions_create(
+                    step="brief",
+                    model=self._model,
+                    messages=messages,  # type: ignore[arg-type]
+                    temperature=0.1,
+                )
+            except Exception as exc:
+                raise self._wrap_ai_error(exc) from exc
+
+        self._track_ai_response(resp, "brief", chat_id)
+        save_provider_response(
+            step="brief",
+            model=self._model,
+            request_messages=messages,
+            response_data=resp.model_dump() if hasattr(resp, "model_dump") else str(resp),
+        )
+        content = resp.choices[0].message.content
+        if not content:
+            raise AIResponseError("Пустой ответ субагента краткой формулировки")
+        return str(content)
 
     # -- Visualization advisor (subagent) --
 

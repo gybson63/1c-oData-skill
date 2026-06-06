@@ -93,10 +93,10 @@ scenarios:
     domain: zup
     report_analog: "Полная выгрузка штата"
     question: "Выгрузи все записи справочника сотрудников"
-    asserts: [no_error, respects_max_fetch]
+    asserts: [no_error, request_blocked]
     status: implemented
     owner: email
-    notes: "Лимит max_fetch_records"
+    notes: "Блокировка полной выгрузки без лимита"
 
   # --- Зарплата и аналитика (сложнее через OData) ---
 
@@ -104,11 +104,21 @@ scenarios:
     layer: e2e
     domain: zup
     report_analog: "Штатная расстановка / численность"
-    question: "Построй график численности сотрудников по подразделениям"
-    asserts: [no_error, has_png_attachment]
-    status: planned
+    question: "Сколько сотрудников в каждом подразделении? Покажи диаграммой"
+    asserts: [no_error, has_png_attachment, has_department]
+    status: flaky
     owner: analytics
-    notes: "Analytics: группировка по подразделению"
+    notes: "Analytics + VisualizationAdvisor: диаграмма по подразделению"
+
+  - id: email-analytics-table
+    layer: e2e
+    domain: zup
+    report_analog: "Численность по подразделениям (таблица)"
+    question: "Сколько сотрудников в каждом подразделении? Покажи таблицей, без графика"
+    asserts: [no_error, has_department, has_number, no_chart_attachment]
+    status: implemented
+    owner: analytics
+    notes: "VisualizationAdvisor: явный запрос таблицы без диаграммы"
 
   - id: email-zup-payroll-analysis
     layer: e2e

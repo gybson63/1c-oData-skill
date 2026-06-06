@@ -22,6 +22,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from bot.agents.base import BaseAgent
 from bot.agents.formatter import FormatterAgent
+from bot.agents.odata.parse_failure import journal_parse_failure_from_response
 from bot.config import get_settings
 from bot.email.attachment_builder import prepare_email_response
 from bot.history import HistoryManager
@@ -34,6 +35,7 @@ from bot.messages import (
     conversation_id_to_chat_id,
 )
 from bot.metrics import session_tokens
+from bot.response_error_journal import journal_error_response_if_needed
 from bot.utils import sanitize_telegram_html
 
 log = logging.getLogger(__name__)
@@ -163,23 +165,37 @@ class Chat:
         if inbound.channel == TransportChannel.EMAIL:
             # Email: без пагинации — загрузить все страницы, если данных больше одной
             if pagination_ctx and self._has_more_pages(pagination_ctx):
-                full_answer = await self._fetch_all_for_email(
-                    pagination_ctx, user_text, fallback=answer, chat_id=inbound.chat_id
-                )
-                if not agent_result.skip_formatter:
-                    answer = await self._format(
-                        full_answer,
-                        user_question=format_question,
-                        channel=inbound.channel,
-                    )
+                from bot.agents.odata.request_brief_advisor import extract_current_query
+                from bot.agents.odata.request_guard import check_request_allowed
+
+                guard = check_request_allowed(extract_current_query(user_text))
+                if guard.blocked:
+                    log.info("Email fetch-all skipped: %s", guard.reason)
                 else:
-                    answer = full_answer
-            return self._finalize_email(
+                    full_answer = await self._fetch_all_for_email(
+                        pagination_ctx, user_text, fallback=answer, chat_id=inbound.chat_id
+                    )
+                    if not agent_result.skip_formatter:
+                        answer = await self._format(
+                            full_answer,
+                            user_question=format_question,
+                            channel=inbound.channel,
+                        )
+                    else:
+                        answer = full_answer
+            outbound = self._finalize_email(
                 answer,
                 inbound,
                 raw_answer=raw_answer,
                 agent_result=agent_result,
             )
+            self._journal_error_response(
+                outbound.text,
+                user_query=format_question,
+                inbound=inbound,
+                raw_answer=raw_answer,
+            )
+            return outbound
 
         if pagination_ctx:
             self.save_pagination_state(pagination_ctx)
@@ -190,13 +206,20 @@ class Chat:
             raw_answer=raw_answer,
             attachments=agent_result.attachments,
         )
-        return OutboundMessage(
+        outbound = OutboundMessage(
             text=chat_response.text,
             channel=TransportChannel.TELEGRAM,
             format="html",
             attachments=chat_response.attachments,
             metadata={"reply_markup": chat_response.reply_markup},
         )
+        self._journal_error_response(
+            outbound.text,
+            user_query=format_question,
+            inbound=inbound,
+            raw_answer=raw_answer,
+        )
+        return outbound
 
     async def process_message(self, user_text: str) -> ChatResponse:
         """Полный пайплайн обработки сообщения.
@@ -242,12 +265,20 @@ class Chat:
             self.save_pagination_state(pagination_ctx)
 
         # Шаг 4: токены + обрезка + санитизация + клавиатура
-        return self._finalize(
+        response = self._finalize(
             answer,
             pagination_ctx,
             raw_answer=raw_answer,
             attachments=agent_result.attachments,
         )
+        self._journal_error_response(
+            response.text,
+            user_query=user_text,
+            channel=TransportChannel.TELEGRAM,
+            chat_id=self.chat_id,
+            raw_answer=raw_answer,
+        )
+        return response
 
     async def process_pagination(self, skip: int) -> ChatResponse:
         """Пайплайн обработки запроса следующей страницы (callback пагинации).
@@ -275,9 +306,55 @@ class Chat:
             self.save_pagination_state(new_ctx)
 
         answer = await self._format(answer, user_question="продолжение")
-        return self._finalize(answer, new_ctx)
+        response = self._finalize(answer, new_ctx)
+        self._journal_error_response(
+            response.text,
+            user_query="продолжение",
+            channel=TransportChannel.TELEGRAM,
+            chat_id=self.chat_id,
+        )
+        return response
 
     # -- pipeline helpers ----------------------------------------------------
+
+    @staticmethod
+    def _journal_error_response(
+        answer: str,
+        *,
+        user_query: str,
+        inbound: InboundMessage | None = None,
+        channel: TransportChannel | str | None = None,
+        chat_id: int | None = None,
+        raw_answer: str | None = None,
+        source: str = "outbound",
+    ) -> None:
+        """Записать ответ в журнал, если пользователю ушло сообщение с «Ошибка»."""
+        ch = channel
+        cid = chat_id
+        conv_id: str | None = None
+        if inbound is not None:
+            ch = inbound.channel
+            cid = inbound.chat_id
+            conv_id = inbound.conversation_id
+        channel_str = ch.value if isinstance(ch, TransportChannel) else str(ch or "")
+        journal_error_response_if_needed(
+            answer=answer,
+            user_query=user_query,
+            channel=channel_str,
+            chat_id=cid,
+            conversation_id=conv_id,
+            raw_answer=raw_answer,
+            source=source,
+        )
+        journal_parse_failure_from_response(
+            answer=answer,
+            user_query=user_query,
+            channel=channel_str,
+            chat_id=cid,
+            conversation_id=conv_id,
+            raw_answer=raw_answer,
+            source=source,
+        )
 
     async def _format(
         self,

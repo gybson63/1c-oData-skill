@@ -111,6 +111,7 @@ class ODataAgent(BaseAgent):
             odata_url=self._cfg["odata_url"],
             auth_header=auth,
             request_timeout=self._request_timeout,
+            metadata=self._metadata,
         )
 
         validator = QueryValidator(
@@ -131,10 +132,10 @@ class ODataAgent(BaseAgent):
             tools=tools,
             model=self._model,
             history_max_turns=self._history_max_turns,
-            default_top=self._default_top,
             max_analytics_records=odata.max_analytics_records,
             max_analytics_joins=odata.max_analytics_joins,
             chart_max_categories=odata.chart_max_categories,
+            config_hint_path=agent_config.get("config_hint_path"),
         )
 
         self._error_handler = ErrorHandler(max_history_turns=self._history_max_turns)
@@ -364,7 +365,10 @@ class ODataAgent(BaseAgent):
             total,
         )
 
-        return await self._ai_service.step2_format_response(
+        from bot.agents.odata.request_brief_advisor import RequestBriefAdvisor
+        from bot.agents.odata.response_headline import apply_request_headline
+
+        answer = await self._ai_service.step2_format_response(
             user_text=user_text,
             records=all_records,
             total=total,
@@ -373,6 +377,12 @@ class ODataAgent(BaseAgent):
             skip=0,
             chat_id=chat_id,
         )
+        brief = await RequestBriefAdvisor().advise(
+            self._ai_service,
+            user_query=user_text,
+            chat_id=chat_id,
+        )
+        return apply_request_headline(answer, brief)
 
     def get_status(self) -> dict[str, Any]:
         return {

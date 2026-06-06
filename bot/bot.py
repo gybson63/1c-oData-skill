@@ -50,6 +50,7 @@ from bot.metrics import (  # noqa: E402
     setup_cost_logging,
     setup_provider_response_logging,
 )
+from bot.response_error_journal import setup_error_response_journal  # noqa: E402
 from bot.telegram_transport import LoggingHTTPXRequest  # noqa: E402
 from bot_lib.exceptions import AIError, ODataError, ODataSkillError  # noqa: E402
 
@@ -549,6 +550,10 @@ def main() -> None:
 
     # Инициализировать сохранение ответов провайдера в logs/<session_id>/
     setup_provider_response_logging(log_dir="logs")
+    setup_error_response_journal(log_dir="logs")
+    from bot.agents.odata.parse_failure import setup_parse_failure_journal
+
+    setup_parse_failure_journal(log_dir="logs")
 
     tg = settings.telegram
 

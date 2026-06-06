@@ -109,6 +109,22 @@ async def test_long_answer_attachment(email_chat):
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_bulk_export_skips_email_fetch_all(email_chat):
+    """Полная выгрузка не должна запускать fetch-all в email."""
+    chat, agent, _ = email_chat
+    agent.process_message.return_value = AgentProcessResult(
+        text="Страница 1",
+        history=_pagination_history(),
+    )
+    inbound = _email_inbound(text="Выгрузи все записи справочника сотрудников")
+
+    await chat.process_inbound(inbound)
+
+    agent.execute_all_pages_with_ctx.assert_not_awaited()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_pagination_triggers_fetch_all(email_chat):
     chat, agent, formatter = email_chat
     agent.process_message.return_value = AgentProcessResult(

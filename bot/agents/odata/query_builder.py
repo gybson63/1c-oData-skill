@@ -10,6 +10,8 @@ from __future__ import annotations
 import logging
 from urllib.parse import quote
 
+from bot.agents.odata.field_aliases import normalize_nav_property
+
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -24,7 +26,7 @@ EXPAND_HIGH_PRIORITY: tuple[str, ...] = (
     "ФизическоеЛицо",
     "Номенклатура",
     "Склад",
-    "Подразделение",
+    "ПодразделениеОрганизации",
     "Должность",
     "Валюта",
     "СтатьяЗатрат",
@@ -133,7 +135,7 @@ def build_expand(
 
     for f in field_names:
         if f.endswith("_Key") and f not in _SKIP_KEY_FIELDS:
-            nav_name = f[:-4]  # убрать суффикс _Key
+            nav_name = normalize_nav_property(f[:-4])  # убрать суффикс _Key
             nav_names.append(nav_name)
 
     if not nav_names:

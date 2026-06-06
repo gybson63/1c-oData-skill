@@ -20,6 +20,7 @@ from bot.email.transport import EmailTransport  # noqa: E402
 from bot.logging_config import setup_logging  # noqa: E402
 from bot.messages import InboundMessage, OutboundMessage  # noqa: E402
 from bot.metrics import setup_cost_logging, setup_provider_response_logging  # noqa: E402
+from bot.response_error_journal import journal_error_response_if_needed, setup_error_response_journal  # noqa: E402
 from bot_lib.exceptions import AIError, ODataError, ODataSkillError  # noqa: E402
 
 log = logging.getLogger(__name__)
@@ -42,16 +43,28 @@ async def handle_inbound(inbound: InboundMessage) -> OutboundMessage | None:
         return await chat.process_inbound(inbound)
     except ODataError as e:
         log.error("OData error: %s", e)
-        return OutboundMessage(text=f"⚠️ Ошибка OData: {e}", channel=inbound.channel)
+        return _error_outbound(inbound, f"⚠️ Ошибка OData: {e}", source="odata_exception")
     except AIError as e:
         log.error("AI error: %s", e)
-        return OutboundMessage(text=f"⚠️ Ошибка AI: {e}", channel=inbound.channel)
+        return _error_outbound(inbound, f"⚠️ Ошибка AI: {e}", source="ai_exception")
     except ODataSkillError as e:
         log.error("Internal error: %s", e)
-        return OutboundMessage(text=f"⚠️ Внутренняя ошибка: {e}", channel=inbound.channel)
+        return _error_outbound(inbound, f"⚠️ Внутренняя ошибка: {e}", source="skill_exception")
     except Exception as e:
         log.exception("Unexpected error processing email")
-        return OutboundMessage(text=f"⚠️ Непредвиденная ошибка: {e}", channel=inbound.channel)
+        return _error_outbound(inbound, f"⚠️ Непредвиденная ошибка: {e}", source="unexpected_exception")
+
+
+def _error_outbound(inbound: InboundMessage, text: str, *, source: str) -> OutboundMessage:
+    journal_error_response_if_needed(
+        answer=text,
+        user_query=inbound.text,
+        channel=inbound.channel.value,
+        chat_id=inbound.chat_id,
+        conversation_id=inbound.conversation_id,
+        source=source,
+    )
+    return OutboundMessage(text=text, channel=inbound.channel)
 
 
 async def run_email_bot(env_file: str, profile: str, cache_dir: str) -> None:
@@ -106,6 +119,10 @@ def main() -> None:
     setup_logging(level=log_level, log_file=args.log_file)
     setup_cost_logging(cost_dir="logs/costs")
     setup_provider_response_logging(log_dir="logs")
+    setup_error_response_journal(log_dir="logs")
+    from bot.agents.odata.parse_failure import setup_parse_failure_journal
+
+    setup_parse_failure_journal(log_dir="logs")
 
     asyncio.run(run_email_bot(args.env_file, args.profile, args.cache_dir))
 

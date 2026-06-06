@@ -75,6 +75,17 @@ async def e2e_bot_runtime(
     tmp_path,
 ):
     """Запустить EmailTransport в фоне с реальными агентами."""
+    from bot.agents.odata.parse_failure import setup_parse_failure_journal
+    from bot.logging_config import setup_logging
+    from bot.metrics import setup_cost_logging, setup_provider_response_logging
+    from bot.response_error_journal import setup_error_response_journal
+
+    setup_logging(level=os.environ.get("LOG_LEVEL", "INFO"), log_dir="logs")
+    setup_cost_logging(cost_dir="logs/costs")
+    setup_provider_response_logging(log_dir="logs")
+    setup_error_response_journal(log_dir="logs")
+    setup_parse_failure_journal(log_dir="logs")
+
     env_file = _resolve_env_file(env_test_file)
     load_settings(env_file=env_file, profile="default")
     _apply_env_overrides(env_file)
@@ -248,6 +259,9 @@ def _check_asserts(scenario: Scenario, reply, original_msg_id: str) -> None:
             assert reply.attachments or len(text) > 200
         elif name == "has_png_attachment":
             assert any(a[0].endswith(".png") for a in reply.attachments)
+        elif name == "no_chart_attachment":
+            filenames = tuple(a[0].lower() for a in reply.attachments)
+            assert not any(fn.endswith(".png") or "chart" in fn for fn in filenames)
         elif name == "mentions_attachment":
             lowered = text.lower()
             assert any(kw in lowered for kw in ("влож", "csv", "chislennost", "подраздел", "числен", "it", "бухгалт"))
@@ -269,6 +283,15 @@ def _check_asserts(scenario: Scenario, reply, original_msg_id: str) -> None:
             assert len(text) > 20
             guids = re.findall(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-", text, re.I)
             assert not guids or re.search(r"подраздел|должност|наименован", text, re.I)
+        elif name == "request_blocked":
+            assert re.search(
+                r"отклонён|высоконагружен|ограничен|лимит|уточните",
+                text,
+                re.I,
+            )
+            question = (scenario.question or "").lower()
+            if question:
+                assert any(word in text.lower() for word in question.split()[:3] if len(word) > 3)
         elif name == "respects_max_fetch":
             from bot.config import get_settings
 
@@ -355,6 +378,30 @@ async def test_e2e_zup_reference_labels(e2e_bot_runtime):
 async def test_e2e_unknown_entity(e2e_bot_runtime):
     _, settings = e2e_bot_runtime
     await _e2e_check(settings, "email-unknown-entity", "unknown-entity")
+
+
+@pytest.mark.slow
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.timeout(600)
+@pytest.mark.skipif(
+    os.environ.get("RUN_FLAKY_TESTS", "").lower() not in ("1", "true", "yes"),
+    reason="email-analytics-chart помечен flaky в каталоге; задайте RUN_FLAKY_TESTS=1",
+)
+async def test_e2e_zup_analytics_chart(e2e_bot_runtime):
+    """Analytics: график численности по подразделениям (зависит от AI + OData)."""
+    _, settings = e2e_bot_runtime
+    await _e2e_check(settings, "email-analytics-chart", "zup-analytics-chart")
+
+
+@pytest.mark.slow
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.timeout(600)
+async def test_e2e_zup_analytics_table(e2e_bot_runtime):
+    """Analytics: сводка по подразделениям только таблицей."""
+    _, settings = e2e_bot_runtime
+    await _e2e_check(settings, "email-analytics-table", "zup-analytics-table")
 
 
 @pytest.mark.slow
@@ -507,6 +554,8 @@ def test_catalog_implemented_e2e_ids_exist():
         "email-empty-body",
         "email-inbound-csv",
         "email-max-fetch-cap",
+        "email-analytics-chart",
+        "email-analytics-table",
     }
     missing = implemented - covered
     assert not missing, f"Add E2E tests for catalog ids: {missing}"

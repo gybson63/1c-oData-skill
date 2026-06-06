@@ -10,9 +10,24 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 log = logging.getLogger(__name__)
+
+_GUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
+_EMPTY_GUID = "00000000-0000-0000-0000-000000000000"
+
+
+def _is_guid(value: Any) -> bool:
+    if value is None:
+        return False
+    text = str(value).strip()
+    return bool(_GUID_RE.match(text)) and text != _EMPTY_GUID
+
 
 # ---------------------------------------------------------------------------
 # Константы
@@ -97,10 +112,12 @@ def _resolve_references_impl(
                     else:
                         # Нет представления — не показываем
                         continue
-                else:
-                    if preserve_unexpanded_keys:
-                        new_rec[key] = value
-                    continue
+                elif value is not None and not _is_guid(value):
+                    # Post-resolve: подпись уже подставлена в *_Key без $expand
+                    new_rec[base] = value
+                elif preserve_unexpanded_keys:
+                    new_rec[key] = value
+                continue
             else:
                 new_rec[key] = value
 

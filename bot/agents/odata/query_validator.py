@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from bot.agents.odata.field_aliases import is_virtual_table_entity, normalize_field_name, normalize_nav_select
 from bot.agents.odata.query_builder import build_expand, trim_expand_for_url_limit
 
 log = logging.getLogger(__name__)
@@ -49,6 +50,7 @@ class QueryValidator:
 
         # Валидация $select
         select = self._normalize_list(query.select)
+        select = normalize_nav_select(select)
         orderby = self._normalize_list(query.orderby)
 
         fields = self._metadata.get_entity_fields(query.entity)
@@ -57,20 +59,22 @@ class QueryValidator:
             select = self._validate_select(fields, select)
             orderby = self._validate_orderby(fields, orderby)
 
-        # Построить $expand
-        expand = build_expand(query.entity, select, fields, self._max_expand_fields)
-
-        # Проверить длину URL
-        expand = trim_expand_for_url_limit(
-            self._odata_url,
-            query.entity,
-            query.filter_expr,
-            select,
-            orderby,
-            top,
-            expand,
-            max_url_length=self._max_url_length,
-        )
+        # $expand на виртуальных таблицах (SliceLast и т.д.) часто отклоняется 1С
+        if is_virtual_table_entity(query.entity):
+            expand = None
+            log.info("$expand omitted for virtual table entity: %s", query.entity)
+        else:
+            expand = build_expand(query.entity, select, fields, self._max_expand_fields)
+            expand = trim_expand_for_url_limit(
+                self._odata_url,
+                query.entity,
+                query.filter_expr,
+                select,
+                orderby,
+                top,
+                expand,
+                max_url_length=self._max_url_length,
+            )
 
         return {
             "select": select,
@@ -93,7 +97,17 @@ class QueryValidator:
         if not select:
             return select
         raw_select = select[len("$select=") :] if select.startswith("$select=") else select
-        valid = [f.strip() for f in raw_select.split(",") if f.strip() in fields]
+        field_set = set(fields)
+        valid: list[str] = []
+        seen: set[str] = set()
+        for part in raw_select.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            resolved = normalize_field_name(part, field_set)
+            if resolved in fields and resolved not in seen:
+                valid.append(resolved)
+                seen.add(resolved)
         result = ",".join(valid) if valid else None
         if result != raw_select:
             log.info("$select скорректирован: %s → %s", raw_select, result)
@@ -106,7 +120,8 @@ class QueryValidator:
             return orderby
         raw_orderby = orderby[len("$orderby=") :] if orderby.startswith("$orderby=") else orderby
         field_name = raw_orderby.split()[0]
-        if field_name not in fields:
+        resolved = normalize_field_name(field_name, set(fields))
+        if resolved not in fields:
             log.info("$orderby '%s' не найден в полях, убираем", field_name)
             return None
         return orderby

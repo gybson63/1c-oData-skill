@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections import OrderedDict
 from xml.etree import ElementTree as ET
 
@@ -198,14 +199,20 @@ def parse_entity_sets(xml_text: str) -> list[dict]:
 
 
 def parse_entity_fields(xml_text: str, entity_name: str) -> list[str]:
-    """Извлечь имена свойств (Property + NavigationProperty) EntityType."""
+    """Извлечь имена свойств (Property + NavigationProperty) EntityType.
+
+    Для entity с виртуальной таблицей (``/SliceLast()`` и т.д.) ищет поля
+    базового регистра, включая строки набора ``RecordSet``.
+    """
     root = _parse_root(xml_text)
     if root is None:
         return []
 
+    base_name = strip_virtual_table_suffix(entity_name)
+
     fields: list[str] = []
     for etype in iter_entity_types(root):
-        if etype.get("Name") == entity_name:
+        if etype.get("Name") == base_name:
             for child in etype:
                 tag = child.tag
                 local = tag.split("}")[-1] if "}" in tag else tag
@@ -214,7 +221,90 @@ def parse_entity_fields(xml_text: str, entity_name: str) -> list[str]:
                     if pname:
                         fields.append(pname)
             break
+
+    recordset_fields = _parse_recordset_row_fields(root, base_name)
+    if recordset_fields:
+        return recordset_fields
+
+    rt_name = f"{base_name}_RecordType"
+    for etype in iter_entity_types(root):
+        if etype.get("Name") != rt_name:
+            continue
+        rt_fields: list[str] = []
+        for child in etype:
+            tag = child.tag
+            local = tag.split("}")[-1] if "}" in tag else tag
+            if local in ("Property", "NavigationProperty"):
+                pname = child.get("Name")
+                if pname:
+                    rt_fields.append(pname)
+        if rt_fields:
+            return rt_fields
+        break
+
     return fields
+
+
+def strip_virtual_table_suffix(entity_name: str) -> str:
+    """Убрать суффикс виртуальной таблицы из имени entity."""
+    if not entity_name:
+        return entity_name
+    return _VT_SUFFIX_RE.sub("", entity_name.strip())
+
+
+_VT_SUFFIX_RE = re.compile(
+    r"/(SliceLast|SliceFirst|Balance|Turnovers|BalanceAndTurnovers|"
+    r"ScheduleData|ActualActionPeriod|Recalculation|Base)\([^)]*\)$",
+)
+
+
+def _collection_inner_type(type_str: str) -> str:
+    """Из ``Collection(Namespace.Type)`` вернуть ``Namespace.Type``."""
+    text = type_str.strip()
+    if text.startswith("Collection(") and text.endswith(")"):
+        return text[len("Collection(") : -1]
+    return text
+
+
+def _parse_recordset_row_fields(root: ET.Element, entity_type_name: str) -> list[str]:
+    """Поля строки RecordSet для регистра (измерения/ресурсы среза)."""
+    recordset_type_name: str | None = None
+    for etype in iter_entity_types(root):
+        if etype.get("Name") != entity_type_name:
+            continue
+        for prop in iter_properties(etype):
+            if prop.get("Name") == "RecordSet":
+                recordset_type_name = _collection_inner_type(prop.get("Type", ""))
+                break
+        break
+
+    if not recordset_type_name:
+        return []
+
+    row_type_local = recordset_type_name.split(".")[-1]
+    fields: list[str] = []
+    for ctype in _iter_complex_types(root):
+        if ctype.get("Name") != row_type_local:
+            continue
+        for child in ctype:
+            local = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+            if local in ("Property", "NavigationProperty"):
+                pname = child.get("Name")
+                if pname:
+                    fields.append(pname)
+        break
+    return fields
+
+
+def _iter_complex_types(root: ET.Element):
+    """Итератор ComplexType в Schema."""
+    schema = find_schema(root)
+    if schema is None:
+        return
+    for child in schema:
+        local = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+        if local == "ComplexType":
+            yield child
 
 
 def search_entities(

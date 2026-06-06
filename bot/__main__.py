@@ -14,10 +14,14 @@ setup_logging(
     log_dir="logs",
 )
 
+from bot.agents.odata.parse_failure import setup_parse_failure_journal  # noqa: E402
 from bot.metrics import setup_cost_logging, setup_provider_response_logging  # noqa: E402
+from bot.response_error_journal import setup_error_response_journal  # noqa: E402
 
 setup_cost_logging(cost_dir="logs/costs")
 setup_provider_response_logging(log_dir="logs")
+setup_error_response_journal(log_dir="logs")
+setup_parse_failure_journal(log_dir="logs")
 
 
 def main() -> None:

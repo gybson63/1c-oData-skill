@@ -46,8 +46,8 @@ class ODataConnectionSettings(BaseModel):
 class ODataQuerySettings(BaseModel):
     """Настройки ограничений OData-запросов."""
 
-    default_top: int = Field(default=20, description="Количество записей по умолчанию ($top)")
-    max_top: int = Field(default=50, description="Максимальное количество записей")
+    default_top: int = Field(default=20, description="Количество записей по умолчанию ($top); подсказка в guard")
+    max_top: int = Field(default=50, description="Максимум записей ($top и явный лимит «до N» в запросе пользователя)")
     request_timeout: int = Field(default=60, description="Таймаут HTTP-запросов, сек")
     max_url_length: int = Field(default=2000, description="Максимальная длина URL")
     max_expand_fields: int = Field(default=15, description="Максимальное число полей в $expand")

@@ -114,10 +114,12 @@ def test_normalize_plan_from_user_log_with_alias_prefix():
 
 
 def test_resolve_references_for_analytics_keeps_key_without_expand():
+    guid_a = "00000000-0000-0000-0000-00000000000a"
+    guid_b = "00000000-0000-0000-0000-00000000000b"
     records = [
-        {"ГоловнаяОрганизация_Key": "guid-a"},
-        {"ГоловнаяОрганизация_Key": "guid-a"},
-        {"ГоловнаяОрганизация_Key": "guid-b"},
+        {"ГоловнаяОрганизация_Key": guid_a},
+        {"ГоловнаяОрганизация_Key": guid_a},
+        {"ГоловнаяОрганизация_Key": guid_b},
     ]
 
     plain = resolve_references(records)

@@ -55,6 +55,7 @@ _RETRY_JSON_HINT = (
     "⚠️ ТОЛЬКО JSON, без рассуждений и без вызовов инструментов!\n"
     "Для графика/сводки используй mode=analytics (queries, aggregate, chart)."
 )
+RETRY_JSON_HINT = _RETRY_JSON_HINT
 
 
 class ToolResolver(ABC):
@@ -176,6 +177,10 @@ class TextToolCallResolver(ToolResolver):
         r'(\w+)\s*=\s*[\'"]([^\'"]*)[\'"]'
         r"\s*\)"
     )
+    _TEXT_TOOL_POSitional_RE = re.compile(
+        r"\b(search_entities|get_entity_fields|odata_reference)\s*\(\s*"
+        r'[\'"]([^\'"]+)[\'"]\s*\)'
+    )
     _TOOL_NAMES = frozenset({"odata_reference", "get_entity_fields", "search_entities"})
 
     async def _try_resolve(
@@ -188,12 +193,19 @@ class TextToolCallResolver(ToolResolver):
             return None
 
         match = self._TEXT_TOOL_RE.search(content)
-        if not match:
-            return None
-
-        tool_name = match.group(1)
-        param_name = match.group(2)
-        param_value = match.group(3)
+        if match:
+            tool_name = match.group(1)
+            param_name = match.group(2)
+            param_value = match.group(3)
+        else:
+            pos = self._TEXT_TOOL_POSitional_RE.search(content)
+            if not pos:
+                return None
+            tool_name = pos.group(1)
+            param_name = "query" if tool_name == "search_entities" else "entity_name"
+            if tool_name == "odata_reference":
+                param_name = "topic"
+            param_value = pos.group(2)
 
         if tool_name not in self._TOOL_NAMES:
             return None
@@ -203,28 +215,86 @@ class TextToolCallResolver(ToolResolver):
             return None
 
         tool_args = {param_name: param_value}
-        log.info("Распознан текстовый tool call: %s(%s)", tool_name, tool_args)
+        return await _execute_tool_and_retry_step1(state, ai_service, tool_name, tool_args)
 
-        result = ai_service.handle_tool_call(tool_name, tool_args)
-        log.info("Text tool result: %s", result[:500] if result else "")
 
-        tool_msg = (
-            f"[Результат инструмента {tool_name}({tool_args})]: {result}\n\n"
-            f"Теперь построй JSON для: {state.user_text}\n{_RETRY_JSON_HINT}"
-        )
-        state.ai_messages.append({"role": "assistant", "content": f"{tool_name}({tool_args})"})
-        state.ai_messages.append({"role": "user", "content": tool_msg})
+class DsmlToolCallResolver(ToolResolver):
+    """Уровень 2b: DeepSeek DSML/XML tool calls в content."""
 
-        resp = await ai_service.step1_call_ai(state.ai_messages, use_tools=False, chat_id=state.chat_id)
-        content = resp.choices[0].message.content or ""
+    _DSML_INVOKE = re.compile(
+        r'<\|?(?:DSML|tool_calls)\|?(?:invoke|function)\s+name=["\']'
+        r'(search_entities|get_entity_fields|odata_reference)["\']',
+        re.I,
+    )
+    _DSML_PARAM = re.compile(
+        r'<\|?(?:DSML|tool_calls)\|?(?:parameter|arg)\s+name=["\'](\w+)["\'][^>]*>'
+        r"([^<]+)</",
+        re.I,
+    )
 
-        msg = resp.choices[0].message
-        if msg.tool_calls:
-            msg = await ai_service.resolve_tool_calls(state.ai_messages, msg, chat_id=state.chat_id)
-            content = msg.content or ""
+    async def _try_resolve(
+        self,
+        state: ODataState,
+        ai_service: Any,
+    ) -> ODataQuery | None:
+        content = state.ai_response_content
+        if not content or "DSML" not in content and "tool_calls" not in content.lower():
+            return None
 
-        state.ai_response_content = content
-        return _try_apply_step1_content(state, content)
+        invokes = list(self._DSML_INVOKE.finditer(content))
+        if not invokes:
+            return None
+
+        tool_name = invokes[0].group(1)
+        params: dict[str, str] = {}
+        for pm in self._DSML_PARAM.finditer(content):
+            params[pm.group(1)] = pm.group(2).strip()
+
+        if tool_name == "search_entities":
+            param_value = params.get("query", "")
+            if param_value.lower() in _VISUAL_STOP_WORDS:
+                return None
+            tool_args = {"query": param_value}
+        elif tool_name == "get_entity_fields":
+            tool_args = {"entity_name": params.get("entity_name", params.get("entity", ""))}
+        else:
+            tool_args = {"topic": params.get("topic", "")}
+
+        if not any(tool_args.values()):
+            log.warning("DSML tool call without parameters: %s", tool_name)
+            return None
+
+        log.info("Распознан DSML tool call: %s(%s)", tool_name, tool_args)
+        return await _execute_tool_and_retry_step1(state, ai_service, tool_name, tool_args)
+
+
+async def _execute_tool_and_retry_step1(
+    state: ODataState,
+    ai_service: Any,
+    tool_name: str,
+    tool_args: dict[str, str],
+) -> ODataQuery | None:
+    """Выполнить инструмент и повторить Step1 с результатом."""
+    result = ai_service.handle_tool_call(tool_name, tool_args)
+    log.info("Tool result (%s): %s", tool_name, result[:500] if result else "")
+
+    tool_msg = (
+        f"[Результат инструмента {tool_name}({tool_args})]: {result}\n\n"
+        f"Теперь построй JSON для: {state.user_text}\n{_RETRY_JSON_HINT}"
+    )
+    state.ai_messages.append({"role": "assistant", "content": f"{tool_name}({tool_args})"})
+    state.ai_messages.append({"role": "user", "content": tool_msg})
+
+    resp = await ai_service.step1_call_ai(state.ai_messages, use_tools=False, chat_id=state.chat_id)
+    content = resp.choices[0].message.content or ""
+
+    msg = resp.choices[0].message
+    if msg.tool_calls:
+        msg = await ai_service.resolve_tool_calls(state.ai_messages, msg, chat_id=state.chat_id)
+        content = msg.content or ""
+
+    state.ai_response_content = content
+    return _try_apply_step1_content(state, content)
 
 
 class AutoSearchResolver(ToolResolver):
@@ -347,8 +417,20 @@ def _extract_json(text: str) -> dict | None:
         lines = [line for line in lines if not line.strip().startswith("```")]
         text = "\n".join(lines).strip()
 
-    start = text.find("{")
-    if start != -1:
+    # Массив объектов [{...}]
+    if text.startswith("["):
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
+                return cast(dict[Any, Any], parsed[0])
+        except json.JSONDecodeError:
+            pass
+
+    start = 0
+    while True:
+        start = text.find("{", start)
+        if start == -1:
+            break
         depth = 0
         for i in range(start, len(text)):
             if text[i] == "{":
@@ -360,9 +442,17 @@ def _extract_json(text: str) -> dict | None:
                     try:
                         return cast(dict[Any, Any], json.loads(candidate))
                     except json.JSONDecodeError:
+                        start = i + 1
                         break
+        else:
+            break
+        if depth != 0:
+            break
 
     try:
-        return cast(dict[Any, Any], json.loads(text))
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            return cast(dict[Any, Any], parsed)
     except json.JSONDecodeError:
         return None
+    return None

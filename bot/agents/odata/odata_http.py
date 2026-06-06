@@ -33,6 +33,7 @@ async def execute_odata_query(
     expand: str | None = None,
     request_timeout: int = 60,
     max_url_length: int = 2000,
+    inline_count: bool = True,
 ) -> tuple[list[dict], int]:
     """Выполнить OData-запрос к 1С.
 
@@ -52,6 +53,7 @@ async def execute_odata_query(
         expand: OData ``$expand``
         request_timeout: таймаут HTTP в секундах
         max_url_length: максимальная длина URL
+        inline_count: добавить ``$inlinecount=allpages`` (для пагинации)
 
     Returns:
         Кортеж ``(records, total_count)``.
@@ -89,7 +91,7 @@ async def execute_odata_query(
                 top=top,
                 skip=skip,
                 expand=clean_expand,
-                count=True,  # всегда запрашивать @odata.count для пагинации
+                count=inline_count,
             )
 
             records = data.get("value", [])

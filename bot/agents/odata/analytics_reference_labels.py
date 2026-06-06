@@ -28,6 +28,7 @@ NAV_PROPERTY_TO_CATALOG: dict[str, str] = {
     "Номенклатура": "Catalog_Номенклатура",
     "Склад": "Catalog_Склады",
     "Подразделение": "Catalog_ПодразделенияОрганизаций",
+    "ПодразделениеОрганизации": "Catalog_ПодразделенияОрганизаций",
     "Должность": "Catalog_Должности",
 }
 
@@ -199,3 +200,40 @@ async def _fetch_ref_labels(
         catalog_entity,
     )
     return labels
+
+
+async def resolve_reference_labels_in_records(
+    records: list[dict[str, Any]],
+    key_columns: list[str],
+    executor: QueryExecutor,
+    metadata: Any | None = None,
+) -> list[dict[str, Any]]:
+    """Заменить GUID в *_Key колонках на Description/Code (без $expand)."""
+    if not records or not key_columns:
+        return records
+
+    out: list[dict[str, Any]] = [dict(r) for r in records]
+    for column in key_columns:
+        if not any(column in r for r in out):
+            continue
+        guids = sorted(
+            {str(r[column]).strip() for r in out if column in r and is_guid(r[column])},
+        )
+        if not guids:
+            continue
+
+        nav_name = column[:-4] if column.endswith("_Key") else column
+        catalog = guess_catalog_entity(nav_name, metadata)
+        if not catalog:
+            log.warning("Не удалось определить справочник для %s", column)
+            continue
+
+        labels = await _fetch_ref_labels(executor, catalog, guids, metadata)
+        if not labels:
+            continue
+
+        for row in out:
+            if column in row:
+                row[column] = _map_label(row[column], labels)
+
+    return out

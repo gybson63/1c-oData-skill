@@ -14,6 +14,30 @@ from bot_lib.metadata_parser import (
     search_entities,
 )
 
+REGISTER_ROW_METADATA_XML = """\
+<?xml version="1.0" encoding="utf-8"?>
+<edmx:Edmx xmlns:edmx="http://schemas.microsoft.com/ado/2007/06/edmx" Version="1.0">
+  <edmx:DataServices xmlns:m="http://schemas.microsoft.com/ado/2007/08/dataservices/metadata">
+    <Schema Namespace="TestConfig" xmlns="http://schemas.microsoft.com/ado/2009/11/edm">
+      <ComplexType Name="InformationRegister_КадроваяИсторияСотрудников_RowType">
+        <Property Name="Period" Type="Edm.DateTimeOffset"/>
+        <Property Name="Сотрудник_Key" Type="Edm.Guid"/>
+        <Property Name="Должность_Key" Type="Edm.Guid"/>
+        <Property Name="ПодразделениеОрганизации_Key" Type="Edm.Guid"/>
+        <NavigationProperty Name="Сотрудник" Type="TestConfig.Catalog_Сотрудники"/>
+        <NavigationProperty Name="Должность" Type="TestConfig.Catalog_Должности"/>
+      </ComplexType>
+      <EntityType Name="InformationRegister_КадроваяИсторияСотрудников">
+        <Key><PropertyRef Name="Recorder"/></Key>
+        <Property Name="Recorder" Type="Edm.String"/>
+        <Property Name="RecordSet" Type="Collection(TestConfig.InformationRegister_КадроваяИсторияСотрудников_RowType)"/>
+        <Property Name="Recorder_Type" Type="Edm.String"/>
+      </EntityType>
+      <EntityContainer Name="TestConfig"/>
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>"""
+
 # =========================================================================
 # parse_entity_sets
 # =========================================================================
@@ -82,6 +106,16 @@ class TestParseEntityFields:
     def test_invalid_xml_returns_empty(self):
         fields = parse_entity_fields("bad xml", "Catalog_Сотрудники")
         assert fields == []
+
+    def test_information_register_slicelast_fields_from_recordset(self):
+        fields = parse_entity_fields(
+            REGISTER_ROW_METADATA_XML,
+            "InformationRegister_КадроваяИсторияСотрудников/SliceLast()",
+        )
+        assert "Сотрудник_Key" in fields
+        assert "Должность_Key" in fields
+        assert "ПодразделениеОрганизации_Key" in fields
+        assert "Сотрудник" in fields
 
 
 # =========================================================================
