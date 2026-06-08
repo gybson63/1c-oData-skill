@@ -13,6 +13,8 @@ from __future__ import annotations
 import abc
 from typing import Any
 
+from bot.messages import AgentProcessResult
+
 
 class BaseAgent(abc.ABC):
     """Абстрактный базовый класс агента."""
@@ -61,7 +63,7 @@ class BaseAgent(abc.ABC):
         history: list[dict[str, str]],
         *,
         chat_id: int | None = None,
-    ) -> tuple[str, list[dict[str, str]]]:
+    ) -> AgentProcessResult:
         """Обработать сообщение пользователя.
 
         Args:
@@ -70,9 +72,7 @@ class BaseAgent(abc.ABC):
             chat_id: ID чата для трекинга токенов по сессии
 
         Returns:
-            Кортеж (answer, updated_history):
-              - answer: текст ответа (HTML для Telegram)
-              - updated_history: обновлённая история диалога
+            AgentProcessResult с текстом ответа, историей и опциональными вложениями.
         """
         ...
 

@@ -6,24 +6,38 @@
 
 ## Что делает пайплайн
 
-Файл `.github/workflows/ci.yml` запускает **3 джоба** последовательно:
+Файл `.github/workflows/ci.yml` запускает джобы:
 
 ```
 lint  →  test  →  build-docker
+         ↑
+    test-slow (nightly / manual, optional)
 ```
 
 ### 1. Lint (`ruff` + `mypy`)
 
 | Инструмент | Что проверяет | Блокирует PR? |
 |---|---|---|
-| **Ruff** | стиль кода, неиспользуемые импорты, ошибки форматирования | ✅ Да |
+| **Ruff check** | стиль кода, неиспользуемые импорты, ошибки | ✅ Да |
+| **Ruff format** | единообразное форматирование (`--check`) | ✅ Да |
 | **Mypy** | типы, сигнатуры функций | ⚠️ Нет (`continue-on-error`) |
 
 ### 2. Test (`pytest` + coverage)
 
-- Запускает все тесты из папки `tests/`
+- Запускает тесты из `tests/`, **исключая** `@pytest.mark.slow`
+- Команда: `pytest -m "not slow" --cov=bot --cov=bot_lib`
+- Включает L1/L2 email-интеграцию (`tests/integration/`)
 - Генерирует отчёт покрытия в `coverage.xml`
 - Опционально загружает покрытие в **Codecov** (нужен `CODECOV_TOKEN`)
+
+### 2b. Slow tests (`test-slow`, email E2E)
+
+- Запуск: **workflow_dispatch** или cron (понедельник 03:00 UTC)
+- Поднимает GreenMail (`docker-compose.test.yml`)
+- Прогоняет `pytest -m "slow" tests/integration/test_email_e2e.py`
+- Secrets: `AI_API_KEY`, `ODATA_URL`, `ODATA_USER`, `ODATA_PASSWORD`
+- `continue-on-error: true` — не блокирует merge (нестабильность live AI)
+- Подробнее: [email-testing.md](email-testing.md)
 
 ### 3. Build Docker
 
@@ -40,6 +54,7 @@ lint  →  test  →  build-docker
 | Push в `main` | ✅ | ✅ | ✅ |
 | Push в `develop` | ✅ | ✅ | ✅ |
 | PR в `main` | ✅ | ✅ | ❌ |
+| Schedule / manual | — | slow E2E | — |
 
 Повторные запуски того же ветки/PR автоматически отменяются (`concurrency`).
 
@@ -59,18 +74,36 @@ ruff check .
 # Ruff — автоисправление
 ruff check --fix .
 
+# Ruff — проверка форматирования (как в CI)
+ruff format --check .
+
+# Ruff — применить форматирование
+ruff format .
+
 # Mypy — проверка типов
-mypy bot/ bot_lib/ --ignore-missing-imports
+mypy bot/ bot_lib/ mcp_servers/ --ignore-missing-imports
+```
+
+### Pre-commit (перед каждым коммитом)
+
+```bash
+pip install pre-commit
+pre-commit install
+pre-commit run --all-files   # ручной прогон
 ```
 
 ### Тесты
 
 ```bash
-# Все тесты
-pytest
+# Быстрые тесты (как в CI)
+pytest -m "not slow"
+
+# Slow email E2E (нужен GreenMail + env.test.json)
+docker compose -f docker-compose.test.yml up -d mail
+pytest -m "slow" tests/integration/test_email_e2e.py -v
 
 # С покрытием
-pytest --cov=bot --cov=bot_lib --cov-report=term-missing
+pytest -m "not slow" --cov=bot --cov=bot_lib --cov-report=term-missing
 
 # Только один файл
 pytest tests/test_config.py -v

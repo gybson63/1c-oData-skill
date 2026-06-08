@@ -43,6 +43,7 @@ import uuid
 from datetime import datetime
 from io import TextIOWrapper
 from pathlib import Path
+from typing import Any, cast
 
 import structlog
 from structlog.stdlib import ProcessorFormatter
@@ -265,7 +266,7 @@ def _configure_structlog(json_format: bool = False) -> ProcessorFormatter:
         ProcessorFormatter для stdlib logging handlers.
     """
     if json_format:
-        renderer = structlog.processors.JSONRenderer(ensure_ascii=False)
+        renderer: Any = structlog.processors.JSONRenderer(ensure_ascii=False)
     else:
         renderer = structlog.dev.ConsoleRenderer(
             colors=True,
@@ -363,7 +364,10 @@ def setup_logging(
     if log_file:
         Path(log_file).parent.mkdir(parents=True, exist_ok=True)
         file_handler = logging.handlers.RotatingFileHandler(
-            log_file, maxBytes=5_000_000, backupCount=3, encoding="utf-8",
+            log_file,
+            maxBytes=5_000_000,
+            backupCount=3,
+            encoding="utf-8",
         )
         file_handler.setFormatter(formatter)
         file_handler.addFilter(_DeduplicateFilter())
@@ -382,6 +386,8 @@ def setup_logging(
     logging.getLogger("httpx").setLevel(logging.WARNING)
     # Подавить шумные логи telegram.bot
     logging.getLogger("telegram").setLevel(logging.WARNING)
+    # Наш structured HTTP-лог (Telegram, OData, AI)
+    logging.getLogger("1c-bot.http").setLevel(log_level)
 
     # Первое сообщение после настройки
     slog = structlog.get_logger("bot.logging_config")
@@ -429,4 +435,4 @@ def get_structlog(name: str | None = None) -> structlog.stdlib.BoundLogger:
     Returns:
         BoundLogger с настроенными processors.
     """
-    return structlog.get_logger(name)
+    return cast(structlog.stdlib.BoundLogger, structlog.get_logger(name))

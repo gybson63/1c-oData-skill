@@ -16,8 +16,14 @@ from typing import Any
 
 from openai import AsyncOpenAI, BadRequestError
 
-from bot.agents.odata.prompts import ODATA_REFERENCE, STEP2_SYSTEM
+from bot.agents.odata.prompts import (
+    ODATA_REFERENCE,
+    REQUEST_BRIEF_SYSTEM,
+    STEP2_SYSTEM,
+    VISUALIZATION_ADVISOR_SYSTEM,
+)
 from bot.config import get_settings
+from bot_lib.ai_retry import chat_completions_with_retry
 from bot_lib.exceptions import AIError, AIResponseError
 
 log = logging.getLogger(__name__)
@@ -37,6 +43,8 @@ class AIService:
         step2_temperature: float = 0.3,
         max_sample_records: int = 30,
         max_data_length: int = 8000,
+        timeout_retry_count: int = 2,
+        timeout_retry_delay: int = 3,
     ) -> None:
         self._client = client
         self._model = model
@@ -47,6 +55,8 @@ class AIService:
         self._step2_temperature = step2_temperature
         self._max_sample_records = max_sample_records
         self._max_data_length = max_data_length
+        self._timeout_retry_count = timeout_retry_count
+        self._timeout_retry_delay = timeout_retry_delay
 
     # -- Step 1: Build OData query --
 
@@ -54,6 +64,7 @@ class AIService:
         self,
         messages: list[dict],
         use_tools: bool,
+        chat_id: int | None = None,
     ):
         """Вызов AI для Шага 1 — с инструментами или без."""
         from bot.metrics import metrics, save_provider_response, track_time
@@ -70,13 +81,13 @@ class AIService:
         metrics.increment("ai_requests_step1")
         async with track_time("ai_step1"):
             try:
-                resp = await self._client.chat.completions.create(**kwargs)  # type: ignore[union-attr]
+                resp = await self._chat_completions_create(step="step1", **kwargs)
             except BadRequestError:
                 raise
             except Exception as exc:
                 raise self._wrap_ai_error(exc) from exc
 
-        self._track_ai_response(resp, "step1")
+        self._track_ai_response(resp, "step1", chat_id)
 
         save_provider_response(
             step="step1",
@@ -86,7 +97,12 @@ class AIService:
         )
         return resp
 
-    async def resolve_tool_calls(self, messages: list[dict], msg1) -> Any:
+    async def resolve_tool_calls(
+        self,
+        messages: list[dict],
+        msg1,
+        chat_id: int | None = None,
+    ) -> Any:
         """Обработать до 2 раундов function calls от AI.
 
         Args:
@@ -114,12 +130,95 @@ class AIService:
             if self._rate_limiter:
                 await self._rate_limiter.wait()
 
-            resp = await self.step1_call_ai(messages, use_tools=True)
+            resp = await self.step1_call_ai(messages, use_tools=True, chat_id=chat_id)
             msg1 = resp.choices[0].message
-            log.info("STEP1 after tools (round %d): content=%r",
-                     round_num, (msg1.content or "")[:500] if msg1.content else None)
+            log.info(
+                "STEP1 after tools (round %d): content=%r",
+                round_num,
+                (msg1.content or "")[:500] if msg1.content else None,
+            )
 
         return msg1
+
+    # -- Request brief (subagent) --
+
+    async def request_brief(
+        self,
+        messages: list[dict],
+        chat_id: int | None = None,
+    ) -> str:
+        """Короткий вызов AI: краткая формулировка запроса для заголовка ответа."""
+        from bot.metrics import metrics, save_provider_response, track_time
+
+        if messages and messages[0].get("role") != "system":
+            messages = [{"role": "system", "content": REQUEST_BRIEF_SYSTEM}, *messages]
+
+        if self._rate_limiter:
+            await self._rate_limiter.wait()
+
+        metrics.increment("ai_requests_brief")
+        async with track_time("ai_brief"):
+            try:
+                resp = await self._chat_completions_create(
+                    step="brief",
+                    model=self._model,
+                    messages=messages,  # type: ignore[arg-type]
+                    temperature=0.1,
+                )
+            except Exception as exc:
+                raise self._wrap_ai_error(exc) from exc
+
+        self._track_ai_response(resp, "brief", chat_id)
+        save_provider_response(
+            step="brief",
+            model=self._model,
+            request_messages=messages,
+            response_data=resp.model_dump() if hasattr(resp, "model_dump") else str(resp),
+        )
+        content = resp.choices[0].message.content
+        if not content:
+            raise AIResponseError("Пустой ответ субагента краткой формулировки")
+        return str(content)
+
+    # -- Visualization advisor (subagent) --
+
+    async def visualization_advise(
+        self,
+        messages: list[dict],
+        chat_id: int | None = None,
+    ) -> str:
+        """Короткий вызов AI: таблица vs диаграмма для analytics."""
+        from bot.metrics import metrics, save_provider_response, track_time
+
+        if messages and messages[0].get("role") != "system":
+            messages = [{"role": "system", "content": VISUALIZATION_ADVISOR_SYSTEM}, *messages]
+
+        if self._rate_limiter:
+            await self._rate_limiter.wait()
+
+        metrics.increment("ai_requests_viz")
+        async with track_time("ai_viz"):
+            try:
+                resp = await self._chat_completions_create(
+                    step="viz",
+                    model=self._model,
+                    messages=messages,  # type: ignore[arg-type]
+                    temperature=0.1,
+                )
+            except Exception as exc:
+                raise self._wrap_ai_error(exc) from exc
+
+        self._track_ai_response(resp, "viz", chat_id)
+        save_provider_response(
+            step="viz",
+            model=self._model,
+            request_messages=messages,
+            response_data=resp.model_dump() if hasattr(resp, "model_dump") else str(resp),
+        )
+        content = resp.choices[0].message.content
+        if not content:
+            raise AIResponseError("Пустой ответ субагента визуализации")
+        return str(content)
 
     # -- Step 2: Format response --
 
@@ -132,16 +231,17 @@ class AIService:
         shown: int = 0,
         skip: int = 0,
         prev_last_record: dict | None = None,
+        chat_id: int | None = None,
     ) -> str:
         """Шаг 2: AI форматирует записи в HTML-ответ для Telegram."""
         from bot.agents.odata.response_parser import resolve_references
         from bot.metrics import metrics, save_provider_response, track_time
 
         resolved = resolve_references(records)
-        sample = resolved[:self._max_sample_records]
+        sample = resolved[: self._max_sample_records]
         data_str = json.dumps(sample, ensure_ascii=False, indent=2)
         if len(data_str) > self._max_data_length:
-            data_str = data_str[:self._max_data_length] + "\n... (данные сокращены)"
+            data_str = data_str[: self._max_data_length] + "\n... (данные сокращены)"
 
         pagination_info = ""
         if shown > 0 and total > shown:
@@ -162,11 +262,14 @@ class AIService:
 
         messages = [
             {"role": "system", "content": STEP2_SYSTEM},
-            {"role": "user", "content": (
-                f"Вопрос: {user_text}\n\nСущность: {entity}\n"
-                f"Всего записей: {total}{pagination_info}{prev_item_info}\n\n"
-                f"Данные:\n{data_str}"
-            )},
+            {
+                "role": "user",
+                "content": (
+                    f"Вопрос: {user_text}\n\nСущность: {entity}\n"
+                    f"Всего записей: {total}{pagination_info}{prev_item_info}\n\n"
+                    f"Данные:\n{data_str}"
+                ),
+            },
         ]
 
         if self._rate_limiter:
@@ -175,7 +278,8 @@ class AIService:
         metrics.increment("ai_requests_step2")
         async with track_time("ai_step2"):
             try:
-                resp = await self._client.chat.completions.create(  # type: ignore[union-attr]
+                resp = await self._chat_completions_create(
+                    step="step2",
                     model=self._model,
                     messages=messages,  # type: ignore[arg-type]
                     temperature=self._step2_temperature,
@@ -183,7 +287,7 @@ class AIService:
             except Exception as exc:
                 raise self._wrap_ai_error(exc) from exc
 
-        self._track_ai_response(resp, "step2")
+        self._track_ai_response(resp, "step2", chat_id)
 
         save_provider_response(
             step="step2",
@@ -195,7 +299,7 @@ class AIService:
         content = resp.choices[0].message.content
         if not content:
             raise AIResponseError("AI вернул пустой ответ на шаге форматирования")
-        return content
+        return str(content)
 
     # -- Tool execution --
 
@@ -220,6 +324,18 @@ class AIService:
 
     # -- Helpers --
 
+    async def _chat_completions_create(self, *, step: str, **kwargs: Any):
+        """Call chat.completions.create with structured HTTP logging and timeout retries."""
+        model = kwargs.pop("model", self._model)
+        return await chat_completions_with_retry(
+            self._client,
+            step=step,
+            model=model,
+            retry_count=self._timeout_retry_count,
+            retry_delay=self._timeout_retry_delay,
+            **kwargs,
+        )
+
     @staticmethod
     def is_tool_use_error(exc: BadRequestError) -> bool:
         """Проверить, связана ли ошибка с отсутствием поддержки tool use."""
@@ -230,44 +346,14 @@ class AIService:
     def _wrap_ai_error(exc: Exception) -> AIError:
         """Обернуть ошибку AI-провайдера в типизированное исключение."""
         from bot_lib.exceptions import AIRateLimitError
+
         msg = str(exc).lower()
         if "429" in msg or "rate" in msg or "limit" in msg:
             return AIRateLimitError(f"Превышен лимит запросов: {exc}")
         return AIError(f"Ошибка AI-сервиса: {exc}")
 
-    def _track_ai_response(self, response, step: str) -> None:
-        """Извлечь usage из ответа AI и записать в метрики."""
-        from bot.metrics import metrics
-
-        usage = getattr(response, "usage", None)
-        if not usage:
-            return
-
-        settings = get_settings()
-        pricing = settings.ai_pricing
-        input_price, output_price = pricing.get_prices(self._model)
-
-        cost_rub = getattr(usage, "cost_rub", None)
-        in_tok = usage.prompt_tokens or 0
-        out_tok = usage.completion_tokens or 0
-
-        metrics.track_ai_usage(
-            model=self._model,
-            input_tokens=in_tok,
-            output_tokens=out_tok,
-            input_price_per_1m=input_price,
-            output_price_per_1m=output_price,
-            cost_rub=cost_rub,
-        )
-
-        # Chat ID передаётся извне через ODataState
-        log.debug(
-            "AI usage [%s]: model=%s in=%d out=%d cost_rub=%s",
-            step, self._model, in_tok, out_tok, cost_rub,
-        )
-
-    def track_ai_response_with_chat(self, response, step: str, chat_id: int | None) -> None:
-        """Полный трекинг AI-ответа включая per-session токены."""
+    def _track_ai_response(self, response, step: str, chat_id: int | None = None) -> None:
+        """Извлечь usage из ответа AI и записать в метрики и session tokens."""
         from bot.metrics import metrics, session_tokens
 
         usage = getattr(response, "usage", None)
@@ -303,5 +389,10 @@ class AIService:
 
         log.debug(
             "AI usage [%s]: model=%s in=%d out=%d cost_rub=%s chat_id=%s",
-            step, self._model, in_tok, out_tok, cost_rub, chat_id,
+            step,
+            self._model,
+            in_tok,
+            out_tok,
+            cost_rub,
+            chat_id,
         )

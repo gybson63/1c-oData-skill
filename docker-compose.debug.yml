@@ -1,0 +1,41 @@
+# docker-compose.debug.yml — Debug overrides for 1c-oData-skill
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.debug.yml up --build
+#   docker compose -f docker-compose.yml -f docker-compose.debug.yml up -d --build
+#   docker compose -f docker-compose.yml -f docker-compose.debug.yml down
+#
+# This file overrides production docker-compose.yml with debug settings:
+#   - Builds from Dockerfile.debug (includes debugpy)
+#   - Maps port 5678 for remote debugging from VS Code
+#   - Mounts source code for live editing (bot/, bot_lib/, mcp_servers/)
+#   - Sets LOG_LEVEL=DEBUG for verbose output
+#   - WAIT_FOR_DEBUGGER controls whether app blocks until debugger connects
+
+services:
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile.debug
+    ports:
+      - "5678:5678"
+    volumes:
+      # Configuration file (read-only mount)
+      - ./env.json:/app/env.json:ro
+      # Persistent data (named volumes survive container rebuilds)
+      - bot-cache:/app/.cache
+      - bot-logs:/app/logs
+      # Source code mounts — live editing without rebuild
+      # Changes to Python files are reflected immediately on restart
+      - ./bot:/app/bot:ro
+      - ./bot_lib:/app/bot_lib:ro
+      - ./mcp_servers:/app/mcp_servers:ro
+      - ./skills:/app/skills:ro
+    environment:
+      - LOG_LEVEL=DEBUG
+      - WAIT_FOR_DEBUGGER=true
+    restart: "no"  # Don't auto-restart in debug — easier to see crashes
+
+volumes:
+  bot-cache:
+  bot-logs:

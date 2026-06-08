@@ -13,6 +13,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from bot.agents.odata.analytics_models import AnalyticsPlan, RequestBrief
+from bot.messages import Attachment
+
 
 @dataclass
 class ODataQuery:
@@ -77,15 +80,22 @@ class ODataState:
     ai_messages: list[dict[str, Any]] = field(default_factory=list)
     ai_response_content: str = ""
     query: ODataQuery | None = None
+    analytics_plan: AnalyticsPlan | None = None
 
     # -- Промежуточное состояние OData --
     records: list[dict[str, Any]] = field(default_factory=list)
     total: int = 0
     auth_header: str = ""
 
+    # -- Заголовок ответа --
+    request_brief: RequestBrief | None = None
+
     # -- Результат --
     answer_html: str = ""
     error: str | None = None
+    attachments: list[Attachment] = field(default_factory=list)
+    chart_html: str = ""
+    dataframe_summary: str | None = None
 
     # -- Пагинация --
     pagination_ctx: dict[str, Any] | None = None
@@ -116,8 +126,20 @@ class ODataState:
         if assistant_content is not None:
             self.history.append({"role": "assistant", "content": assistant_content})
         elif self.pagination_ctx is not None:
-            self.history.append({
-                "role": "assistant",
-                "content": _json.dumps(self.pagination_ctx, ensure_ascii=False),
-            })
-        return self.history[-(max_turns * 2):]
+            ctx = dict(self.pagination_ctx)
+            summary_parts = [str(ctx.get("entity", "?"))]
+            if ctx.get("filter"):
+                summary_parts.append(f"filter={str(ctx['filter'])[:80]}")
+            if ctx.get("count"):
+                summary_parts.append("count=true")
+            elif ctx.get("mode") == "analytics":
+                summary_parts.append("analytics")
+            ctx["_history_type"] = "pagination_ctx"
+            ctx["_summary"] = " | ".join(summary_parts)
+            self.history.append(
+                {
+                    "role": "assistant",
+                    "content": _json.dumps(ctx, ensure_ascii=False),
+                }
+            )
+        return self.history[-(max_turns * 2) :]

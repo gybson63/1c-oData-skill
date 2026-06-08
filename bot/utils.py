@@ -7,7 +7,7 @@ import asyncio
 import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 log = logging.getLogger(__name__)
 
@@ -23,6 +23,7 @@ class RateLimiter:
     async def wait(self) -> None:
         async with self._lock:
             import time
+
             now = time.monotonic()
             elapsed = now - self._last
             if elapsed < self._interval:
@@ -51,7 +52,7 @@ def load_config(env_file: str, profile: str = "default") -> dict[str, Any]:
         available = ", ".join(profiles.keys()) or "(нет)"
         raise ValueError(f"Профиль '{profile}' не найден. Доступные: {available}")
 
-    return profiles[profile]
+    return cast(dict[str, Any], profiles[profile])
 
 
 def esc_html(text: str) -> str:

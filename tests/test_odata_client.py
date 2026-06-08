@@ -68,7 +68,8 @@ class TestGetEntities:
             mock_response.is_success = False
 
             with patch.object(
-                client._client, "request",
+                client._client,
+                "request",
                 new_callable=AsyncMock,
                 return_value=mock_response,
             ):
@@ -91,7 +92,8 @@ class TestGetEntities:
             mock_response.is_success = False
 
             with patch.object(
-                client._client, "request",
+                client._client,
+                "request",
                 new_callable=AsyncMock,
                 return_value=mock_response,
             ):
@@ -117,9 +119,7 @@ class TestGetCount:
     async def test_get_count_success(self, odata_url: str):
         """Получение количества — целое число."""
         with respx.mock:
-            respx.get(f"{odata_url}/Catalog_Сотрудники/$count").mock(
-                return_value=httpx.Response(200, text="42")
-            )
+            respx.get(f"{odata_url}/Catalog_Сотрудники/$count").mock(return_value=httpx.Response(200, text="42"))
 
             async with ODataClient(odata_url) as client:
                 result = await client.get_count("Catalog_Сотрудники")
@@ -137,22 +137,19 @@ class TestGetCount:
             mock_response.raise_for_status = MagicMock()
 
             with patch.object(
-                client._client, "request",
+                client._client,
+                "request",
                 new_callable=AsyncMock,
                 return_value=mock_response,
             ):
-                result = await client.get_count(
-                    "Catalog_Test", filter_="DeletionMark eq false"
-                )
+                result = await client.get_count("Catalog_Test", filter_="DeletionMark eq false")
                 assert result == 7
 
     @pytest.mark.asyncio
     async def test_get_count_zero(self, odata_url: str):
         """Количество = 0."""
         with respx.mock:
-            respx.get(f"{odata_url}/Catalog_Empty/$count").mock(
-                return_value=httpx.Response(200, text="0")
-            )
+            respx.get(f"{odata_url}/Catalog_Empty/$count").mock(return_value=httpx.Response(200, text="0"))
 
             async with ODataClient(odata_url) as client:
                 result = await client.get_count("Catalog_Empty")
@@ -171,9 +168,7 @@ class TestGetMetadata:
     async def test_get_metadata_success(self, odata_url: str, sample_metadata_xml: str):
         """Получение $metadata XML."""
         with respx.mock:
-            respx.get(f"{odata_url}/$metadata").mock(
-                return_value=httpx.Response(200, text=sample_metadata_xml)
-            )
+            respx.get(f"{odata_url}/$metadata").mock(return_value=httpx.Response(200, text=sample_metadata_xml))
 
             async with ODataClient(odata_url) as client:
                 result = await client.get_metadata()
@@ -194,7 +189,8 @@ class TestConnectionErrors:
         """Timeout → ODataConnectionError."""
         async with ODataClient(odata_url, timeout=1) as client:
             with patch.object(
-                client, "_request_raw",
+                client,
+                "_request_raw",
                 new_callable=AsyncMock,
                 side_effect=ODataConnectionError("Timeout при запросе GET /Catalog_Test"),
             ):
@@ -206,7 +202,8 @@ class TestConnectionErrors:
         """ConnectionError → ODataConnectionError."""
         async with ODataClient(odata_url) as client:
             with patch.object(
-                client, "_request_raw",
+                client,
+                "_request_raw",
                 new_callable=AsyncMock,
                 side_effect=ODataConnectionError("Ошибка соединения при GET /Catalog_Test"),
             ):
@@ -218,7 +215,8 @@ class TestConnectionErrors:
         """httpx.ReadTimeout внутри _request_raw → ODataConnectionError."""
         async with ODataClient(odata_url) as client:
             with patch.object(
-                client._client, "request",
+                client._client,
+                "request",
                 new_callable=AsyncMock,
                 side_effect=httpx.ReadTimeout("timeout"),
             ):
@@ -230,7 +228,8 @@ class TestConnectionErrors:
         """httpx.ConnectError внутри _request_raw → ODataConnectionError."""
         async with ODataClient(odata_url) as client:
             with patch.object(
-                client._client, "request",
+                client._client,
+                "request",
                 new_callable=AsyncMock,
                 side_effect=httpx.ConnectError("refused"),
             ):
@@ -257,7 +256,8 @@ class TestJsonParseError:
             mock_response.json.side_effect = ValueError("Expecting value")
 
             with patch.object(
-                client._client, "request",
+                client._client,
+                "request",
                 new_callable=AsyncMock,
                 return_value=mock_response,
             ):
@@ -331,9 +331,7 @@ class TestBuildParams:
         assert result["$top"] == 0
 
     def test_none_values_omitted(self):
-        result = ODataClient._build_params(
-            filter_=None, select=None, orderby=None, top=None, skip=None, expand=None
-        )
+        result = ODataClient._build_params(filter_=None, select=None, orderby=None, top=None, skip=None, expand=None)
         assert result == {}
 
 
@@ -385,13 +383,12 @@ class TestGetCountUrlEncoding:
                 return mock_response
 
             with patch.object(
-                client._client, "request",
+                client._client,
+                "request",
                 new_callable=AsyncMock,
                 side_effect=capture_request,
             ):
-                result = await client.get_count(
-                    "Catalog_Организации", filter_="DeletionMark eq false"
-                )
+                result = await client.get_count("Catalog_Организации", filter_="DeletionMark eq false")
                 assert result == 5
 
         # Проверяем что URL содержит %20, а не +

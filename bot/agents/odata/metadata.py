@@ -34,6 +34,7 @@ DEFAULT_METADATA_CACHE_SECONDS = 86400  # 24 часа
 # Загрузка $metadata (делегирует ODataClient)
 # ---------------------------------------------------------------------------
 
+
 async def fetch_metadata_from_server(
     odata_url: str,
     auth_header: str,
@@ -65,6 +66,7 @@ async def fetch_metadata_from_server(
 # ---------------------------------------------------------------------------
 # Кэш метаданных
 # ---------------------------------------------------------------------------
+
 
 class MetadataCache:
     """Кэш сущностей и полей 1С OData.
@@ -144,11 +146,19 @@ class MetadataCache:
 
     # Префиксы типов объектов 1С для подсказки в промпте
     _TYPE_PREFIXES = [
-        "Catalog_", "Document_", "InformationRegister_",
-        "AccumulationRegister_", "ChartOfAccounts_",
-        "ChartOfCharacteristicTypes_", "ChartOfCalculationTypes_",
-        "Processing_", "Report_", "Enum_", "Task_",
-        "Sequence_", "ExchangePlan_",
+        "Catalog_",
+        "Document_",
+        "InformationRegister_",
+        "AccumulationRegister_",
+        "ChartOfAccounts_",
+        "ChartOfCharacteristicTypes_",
+        "ChartOfCalculationTypes_",
+        "Processing_",
+        "Report_",
+        "Enum_",
+        "Task_",
+        "Sequence_",
+        "ExchangePlan_",
     ]
 
     def search_entities(self, query: str, top: int = 20) -> list[str]:

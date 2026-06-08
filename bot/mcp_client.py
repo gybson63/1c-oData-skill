@@ -44,6 +44,7 @@ log = logging.getLogger("1c-bot.mcp")
 
 class MCPToolError(Exception):
     """Raised when an MCP tool returns an error response (isError=True)."""
+
     def __init__(self, message: str, details: str = ""):
         super().__init__(message)
         self.details = details
@@ -61,19 +62,18 @@ def _check_mcp_available() -> bool:
     if _mcp_available is None:
         try:
             from mcp import ClientSession  # noqa: F401
+
             _mcp_available = True
         except ImportError:
             _mcp_available = False
-            log.warning(
-                "Пакет 'mcp' не установлен. MCP-серверы не будут подключены. "
-                "Установите: pip install mcp"
-            )
+            log.warning("Пакет 'mcp' не установлен. MCP-серверы не будут подключены. Установите: pip install mcp")
     return _mcp_available
 
 
 # ---------------------------------------------------------------------------
 # MCP tool → OpenAI function calling format converter
 # ---------------------------------------------------------------------------
+
 
 def _mcp_tool_to_openai(tool: Any) -> dict:
     """Convert an MCP Tool object to OpenAI function calling format."""
@@ -96,6 +96,7 @@ def _mcp_tool_to_openai(tool: Any) -> dict:
 # ---------------------------------------------------------------------------
 # MCP Server Connection (background-task pattern to avoid anyio scope issues)
 # ---------------------------------------------------------------------------
+
 
 class MCPServerConnection:
     """Manages a connection to a single MCP server.
@@ -153,8 +154,9 @@ class MCPServerConnection:
         if not self._connected or not self.session:
             raise MCPToolError(f"MCP-сервер '{self.name}' не подключён")
 
-        log.info("MCP [%s]: вызов инструмента %s(%s)", self.name, tool_name,
-                  json.dumps(arguments, ensure_ascii=False)[:200])
+        log.info(
+            "MCP [%s]: вызов инструмента %s(%s)", self.name, tool_name, json.dumps(arguments, ensure_ascii=False)[:200]
+        )
 
         result = await self.session.call_tool(tool_name, arguments)
 
@@ -278,6 +280,7 @@ class MCPServerConnection:
 # MCP Client Manager
 # ---------------------------------------------------------------------------
 
+
 class MCPClientManager:
     """Manages connections to multiple MCP servers.
 
@@ -309,9 +312,11 @@ class MCPClientManager:
                     if t.name in self._tool_to_server:
                         existing = self._tool_to_server[t.name]
                         log.warning(
-                            "MCP: инструмент '%s' дублируется между '%s' и '%s'. "
-                            "Будет использован '%s'",
-                            t.name, existing, name, existing,
+                            "MCP: инструмент '%s' дублируется между '%s' и '%s'. Будет использован '%s'",
+                            t.name,
+                            existing,
+                            name,
+                            existing,
                         )
                     else:
                         self._tool_to_server[t.name] = name
@@ -319,7 +324,9 @@ class MCPClientManager:
         total_tools = sum(len(s._tools_cache) for s in self._servers.values())
         log.info(
             "MCP: подключено %d/%d серверов, %d инструментов",
-            len(self._servers), len(mcp_config), total_tools,
+            len(self._servers),
+            len(mcp_config),
+            total_tools,
         )
 
     async def disconnect_all(self) -> None:

@@ -9,6 +9,7 @@ build/
 
 # --- Environment ---
 env.json
+env.test.json
 .env
 .venv/
 venv/
@@ -29,6 +30,7 @@ logs/
 .coverage
 coverage.xml
 htmlcov/
+tests/artifacts/
 
 # --- Temp files ---
 tmp_*.txt

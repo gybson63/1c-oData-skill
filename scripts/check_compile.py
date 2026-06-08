@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Quick compilation check for new modules."""
+
 import py_compile
 import sys
 

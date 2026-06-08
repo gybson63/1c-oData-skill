@@ -44,7 +44,7 @@ from collections import defaultdict
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -224,9 +224,7 @@ class MetricsRegistry:
         """
         uptime = time.monotonic() - self._start_time
 
-        counters_report = {
-            name: entry.count for name, entry in sorted(self._counters.items())
-        }
+        counters_report = {name: entry.count for name, entry in sorted(self._counters.items())}
 
         timers_report: dict[str, dict[str, Any]] = {}
         for name, entry in sorted(self._timers.items()):
@@ -244,19 +242,19 @@ class MetricsRegistry:
         total_cost = 0.0
         total_cost_rub = 0.0
         total_requests = 0
-        for model, entry in sorted(self._ai_usage.items()):
+        for model, usage_entry in sorted(self._ai_usage.items()):
             ai_report[model] = {
-                "requests": entry.requests,
-                "input_tokens": entry.input_tokens,
-                "output_tokens": entry.output_tokens,
-                "cost_usd": round(entry.total_cost_usd, 6),
-                "cost_rub": round(entry.total_cost_rub, 6),
+                "requests": usage_entry.requests,
+                "input_tokens": usage_entry.input_tokens,
+                "output_tokens": usage_entry.output_tokens,
+                "cost_usd": round(usage_entry.total_cost_usd, 6),
+                "cost_rub": round(usage_entry.total_cost_rub, 6),
             }
-            total_input += entry.input_tokens
-            total_output += entry.output_tokens
-            total_cost += entry.total_cost_usd
-            total_cost_rub += entry.total_cost_rub
-            total_requests += entry.requests
+            total_input += usage_entry.input_tokens
+            total_output += usage_entry.output_tokens
+            total_cost += usage_entry.total_cost_usd
+            total_cost_rub += usage_entry.total_cost_rub
+            total_requests += usage_entry.requests
 
         return {
             "uptime_seconds": round(uptime, 1),
@@ -298,10 +296,7 @@ class MetricsRegistry:
             lines.append("")
             lines.append("⏱ Таймеры:")
             for name, t in r["timers"].items():
-                lines.append(
-                    f"  • {name}: {t['count']} вызовов, "
-                    f"avg={t['avg_s']}с, total={t['total_s']}с"
-                )
+                lines.append(f"  • {name}: {t['count']} вызовов, avg={t['avg_s']}с, total={t['total_s']}с")
 
         # AI Usage
         ai = r["ai_usage"]
@@ -444,7 +439,10 @@ class SessionTokenTracker:
     ) -> None:
         """Записать токены и стоимость для сессии."""
         self._sessions.setdefault(chat_id, SessionTokens()).record(
-            input_tokens, output_tokens, cost_usd=cost_usd, cost_rub=cost_rub,
+            input_tokens,
+            output_tokens,
+            cost_usd=cost_usd,
+            cost_rub=cost_rub,
         )
 
     def get(self, chat_id: int) -> SessionTokens:
@@ -670,8 +668,8 @@ INTERVAL_SECONDS: dict[str, int] = {
 class CostBucket:
     """Агрегированная запись затрат за интервал."""
 
-    interval: str          # "minute", "hour", "day", …
-    bucket_start: str      # ISO timestamp начала интервала
+    interval: str  # "minute", "hour", "day", …
+    bucket_start: str  # ISO timestamp начала интервала
     requests: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
@@ -738,9 +736,7 @@ class CostAnalyzer:
         if interval == "week":
             # Начало недели (понедельник)
             days_since_monday = dt.weekday()
-            return (dt - __import__("datetime").timedelta(days=days_since_monday)).replace(
-                hour=0, minute=0, second=0, microsecond=0
-            )
+            return (dt - timedelta(days=days_since_monday)).replace(hour=0, minute=0, second=0, microsecond=0)
         if interval == "day":
             return dt.replace(hour=0, minute=0, second=0, microsecond=0)
         if interval in ("12h", "6h"):
@@ -854,9 +850,16 @@ class CostAnalyzer:
         total_out = sum(b.output_tokens for b in buckets)
 
         interval_ru = {
-            "minute": "минута", "5min": "5 минут", "15min": "15 минут",
-            "30min": "30 минут", "hour": "час", "6h": "6 часов",
-            "12h": "12 часов", "day": "день", "week": "неделя", "month": "месяц",
+            "minute": "минута",
+            "5min": "5 минут",
+            "15min": "15 минут",
+            "30min": "30 минут",
+            "hour": "час",
+            "6h": "6 часов",
+            "12h": "12 часов",
+            "day": "день",
+            "week": "неделя",
+            "month": "месяц",
         }.get(interval, interval)
 
         lines: list[str] = [
@@ -869,10 +872,7 @@ class CostAnalyzer:
 
         lines.append("")
         cost_str = f"${total_cost:.6f}" if total_cost < 0.01 else f"${total_cost:.4f}"
-        lines.append(
-            f"  ═ Итого: {total_req} запросов, "
-            f"IN={total_in}, OUT={total_out}, {cost_str}"
-        )
+        lines.append(f"  ═ Итого: {total_req} запросов, IN={total_in}, OUT={total_out}, {cost_str}")
 
         return "\n".join(lines)
 

@@ -1,0 +1,37 @@
+# docker-compose.test.yml — почтовый стенд для email E2E-тестов
+#
+# GreenMail предоставляет IMAP + SMTP (MailHog не поддерживает IMAP,
+# который нужен EmailTransport для опроса входящих писем).
+#
+# Usage:
+#   docker compose -f docker-compose.test.yml up -d
+#   pytest -m "slow" tests/integration/test_email_e2e.py
+#   docker compose -f docker-compose.test.yml down
+
+services:
+  mail:
+    image: greenmail/standalone:2.1.4
+    ports:
+      - "3025:3025"   # SMTP
+      - "3143:3143"   # IMAP
+      - "8025:8080"   # Web UI (для отладки)
+    environment:
+      GREENMAIL_OPTS: >-
+        -Dgreenmail.setup.test.all
+        -Dgreenmail.hostname=0.0.0.0
+        -Dgreenmail.users=bot:secret@local.test,tester:secret@local.test
+
+  bot:
+    build: .
+    command: ["python", "-m", "bot", "--transport", "email"]
+    depends_on:
+      - mail
+    restart: unless-stopped
+    volumes:
+      - ./env.test.json:/app/env.json:ro
+      - bot-test-cache:/app/.cache
+    environment:
+      - LOG_LEVEL=INFO
+
+volumes:
+  bot-test-cache:

@@ -1,0 +1,60 @@
+# Pre-commit hooks for 1c-oData-skill
+#
+# Installation:
+#   pip install pre-commit
+#   pre-commit install
+#
+# Manual run:
+#   pre-commit run --all-files
+#
+# Hooks run automatically on `git commit` to catch issues before they reach CI.
+
+repos:
+  # Ruff — lint + format (replaces flake8, isort, black)
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.0
+    hooks:
+      # Linter: check for errors, fix auto-fixable issues
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+        types_or: [python, pyi]
+      # Formatter: enforce consistent style
+      - id: ruff-format
+        types_or: [python, pyi]
+
+  # Mypy — static type checking (same paths as CI)
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.20.2
+    hooks:
+      - id: mypy
+        args: [bot/, bot_lib/, mcp_servers/]
+        pass_filenames: false
+        additional_dependencies:
+          - pydantic>=2.0
+          - httpx>=0.27.0
+          - pandas>=2.0
+
+  # General file hygiene
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      # Ensure files end with newline (prevents W292)
+      - id: end-of-file-fixer
+        exclude: ^(processing/|\.cache/|logs/)
+      # Remove trailing whitespace
+      - id: trailing-whitespace
+        exclude: ^(processing/|\.cache/|logs/)
+      # Prevent giant files from being committed
+      - id: check-added-large-files
+        args: [--maxkb=500]
+      # Check YAML syntax
+      - id: check-yaml
+        exclude: ^(processing/)
+      # Check JSON syntax
+      - id: check-json
+      # Check TOML syntax (pyproject.toml)
+      - id: check-toml
+      # Prevent commit to main/develop
+      - id: no-commit-to-branch
+        args: [--branch, main, --branch, develop]
+        stages: [pre-commit]

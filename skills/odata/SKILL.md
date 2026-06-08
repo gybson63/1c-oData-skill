@@ -11,6 +11,21 @@ description: Получение данных из 1С:Предприятие ч�
 1С реализует **OData версии 3.0** (протокол `odata/standard.odata`).
 Работает с любой конфигурацией 1С, где опубликована база через веб-сервер.
 
+## Подготовка запроса через conf-doc
+
+Если подключён MCP **1c-conf-doc**, перед построением OData-запроса уточни структуру метаданных:
+
+1. `conf_doc_search(query="...")` — найти объект по смыслу запроса пользователя
+2. `conf_doc_get_object` + `conf_doc_get_object_chunk` — прочитать реквизиты и типы полей
+3. Сопоставить тип с OData-префиксом (`Document` → `Document_`, `Catalog` → `Catalog_`, …)
+4. Выполнить `fetch` с корректным `entity`, `$filter`, `$select`
+
+Подробнее — [`skills/conf-doc/SKILL.md`](../conf-doc/SKILL.md).
+
+**Пример:** вопрос «отпуска сотрудника Иванова за май»:
+- conf-doc: `Document.Отпуск`, реквизиты `Сотрудник`, `ДатаНачала`, `ДатаОкончания`
+- OData: `Document_Отпуск?$filter=...&$select=...`
+
 ## MCP-инструмент fetch
 
 Для запросов к 1С OData используется MCP-инструмент **`fetch`** (пакет `@modelcontextprotocol/server-fetch`).
@@ -416,3 +431,38 @@ fetch(
 
 1С использует OData v3, где вместо `contains(Поле, 'значение')` нужно использовать
 `substringof('значение', Поле) eq true`.
+
+## MCP-инструменты analytics (1c-odata-mcp)
+
+Помимо `fetch`, сервер `mcp_servers/odata_server.py` предоставляет:
+
+### fetch_table
+
+Загрузить таблицу из одной сущности в CSV или JSON:
+
+```
+fetch_table(
+  entity="Catalog_Контрагенты",
+  filter="DeletionMark eq false",
+  select="Description,Code,ИНН",
+  top=200,
+  format="csv"
+)
+```
+
+### analyze_data
+
+Multi-query analytics с join в pandas и опциональным графиком:
+
+```
+analyze_data(
+  queries=[
+    {"alias": "sales", "entity": "Document_Реализация", "filter": "...", "select": "...", "top": 200}
+  ],
+  aggregate={"group_by": ["Контрагент"], "agg": {"СуммаДокумента": "sum"}},
+  chart={"type": "bar", "x": "Контрагент", "y": "СуммаДокумента", "title": "Продажи"},
+  explanation="..."
+)
+```
+
+Ответ JSON: `rows`, `columns`, `csv_preview`, `chart_png_base64`, `chart_html`.

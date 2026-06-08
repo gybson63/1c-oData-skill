@@ -15,11 +15,13 @@ from openai import AsyncOpenAI
 
 from bot.agents.base import BaseAgent
 from bot.config import get_settings
+from bot.messages import AgentProcessResult
 from bot.metrics import metrics, save_provider_response, session_tokens, track_time
 from bot.utils import RateLimiter
+from bot_lib.ai_retry import chat_completions_with_retry
 from bot_lib.exceptions import AIRateLimitError, AIResponseError
 
-from .prompts import FORMATTER_SYSTEM
+from .prompts import FORMATTER_EMAIL_SYSTEM, FORMATTER_SYSTEM
 
 log = logging.getLogger(__name__)
 
@@ -89,9 +91,9 @@ class FormatterAgent(BaseAgent):
         history: list[dict[str, str]],
         *,
         chat_id: int | None = None,
-    ) -> tuple[str, list[dict[str, str]]]:
+    ) -> AgentProcessResult:
         """Не используется напрямую — форматирование через format_response()."""
-        return user_text, history
+        return AgentProcessResult(text=user_text, history=history)
 
     async def format_response(
         self,
@@ -99,19 +101,20 @@ class FormatterAgent(BaseAgent):
         user_question: str = "",
         *,
         chat_id: int | None = None,
+        channel: str = "telegram",
     ) -> str:
-        """Отформатировать ответ агента для Telegram.
+        """Отформатировать ответ агента для указанного канала.
 
         Args:
-            raw_answer: исходный текст ответа (может быть plain text или частично HTML)
-            user_question: оригинальный вопрос пользователя (для контекста)
-            chat_id: ID чата для трекинга токенов по сессии
-
-        Returns:
-            Отформатированный HTML-ответ для Telegram
+            raw_answer: исходный текст ответа
+            user_question: оригинальный вопрос пользователя
+            chat_id: ID чата для трекинга токенов
+            channel: ``telegram`` или ``email``
         """
         if not self._enabled or not self._ai_client:
             return raw_answer
+
+        system_prompt = FORMATTER_EMAIL_SYSTEM if channel == "email" else FORMATTER_SYSTEM
 
         # Если ответ уже хорошо отформатирован (содержит много тегов),
         # всё равно прогоняем через форматирование для стандартизации
@@ -121,7 +124,7 @@ class FormatterAgent(BaseAgent):
         user_content += f"Текст для форматирования:\n{raw_answer}"
 
         messages = [
-            {"role": "system", "content": FORMATTER_SYSTEM},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content},
         ]
 
@@ -129,10 +132,15 @@ class FormatterAgent(BaseAgent):
             await self._rate_limiter.wait()
 
         metrics.increment("ai_requests_formatter")
+        ai = get_settings().ai
         async with track_time("ai_formatter"):
             try:
-                resp = await self._ai_client.chat.completions.create(
+                resp = await chat_completions_with_retry(
+                    self._ai_client,
+                    step="formatter",
                     model=self._model,
+                    retry_count=ai.timeout_retry_count,
+                    retry_delay=ai.timeout_retry_delay,
                     messages=messages,  # type: ignore[arg-type]
                     temperature=self._temperature,
                 )
@@ -169,7 +177,11 @@ class FormatterAgent(BaseAgent):
                 )
             log.debug(
                 "AI usage [formatter]: model=%s in=%d out=%d cost_rub=%s chat_id=%s",
-                self._model, in_tok, out_tok, cost_rub, chat_id,
+                self._model,
+                in_tok,
+                out_tok,
+                cost_rub,
+                chat_id,
             )
 
         # Сохранить ответ провайдера
@@ -187,7 +199,8 @@ class FormatterAgent(BaseAgent):
 
         log.info(
             "FormatterAgent: %d → %d символов",
-            len(raw_answer), len(formatted),
+            len(raw_answer),
+            len(formatted),
         )
         return formatted
 
