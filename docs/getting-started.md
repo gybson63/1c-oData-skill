@@ -79,9 +79,11 @@ MCP для Cursor: [`mcp-setup.md`](mcp-setup.md).
 
 ```bash
 python -m bot
-# с параметрами:
-python -m bot --env-file env.json --profile default --log-level DEBUG
+# Telegram + email одновременно:
+python -m bot --transport both
 ```
+
+Email только: `--transport email`. Инструкция: [`email.md`](email.md).
 
 ### 4. SearXNG (опционально)
 
@@ -100,6 +102,7 @@ python scripts/test_searxng_mcp.py
 | Задача | Документ |
 |--------|----------|
 | Настройка env.json | [`configuration.md`](configuration.md) |
+| **Email-интерфейс** | **[`email.md`](email.md)** |
 | MCP в Cursor | [`mcp-setup.md`](mcp-setup.md) |
 | SearXNG для аналитика | [`searxng.md`](searxng.md) |
 | Пользователь бота (Telegram) | [`user-guide.md`](user-guide.md) |
