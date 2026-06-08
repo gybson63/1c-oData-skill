@@ -333,6 +333,7 @@ Telegram ограничивает длину одного сообщения. Е
 | Документ | Описание |
 |----------|----------|
 | [`README.md`](../README.md) | Обзор проекта и киллер-фичи |
+| [`docs/email.md`](email.md) | **Email-интерфейс: настройка и запуск** |
 | [`docs/getting-started.md`](getting-started.md) | Установка и быстрый запуск |
 | [`docs/configuration.md`](configuration.md) | Справочник env.json |
 | [`docs/full-guide.md`](full-guide.md) | Полное техническое руководство OData |

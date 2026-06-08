@@ -187,7 +187,7 @@ Docker, gating conf-doc→SearXNG, отладка: **[`searxng.md`](searxng.md)*
 
 Секция `email` в профиле (`enabled: false` по умолчанию). IMAP/SMTP, allowed_senders, лимиты вложений.
 
-Тестирование: [`email-testing.md`](email-testing.md).
+Настройка и использование: **[`email.md`](email.md)**. Тестирование: [`email-testing.md`](email-testing.md).
 
 ---
 

@@ -174,7 +174,9 @@ python -m bot --env-file env.json --profile default --log-level DEBUG
 
 ## Email-интерфейс
 
-Опциональный IMAP/SMTP (`email.enabled: true` в env.json). Префикс `[analyze]` для аналитика. Тестирование: [`docs/email-testing.md`](../docs/email-testing.md).
+Опциональный IMAP/SMTP (`email.enabled: true` в env.json). Префикс `[analyze]` для аналитика.
+
+Инструкция: **[`docs/email.md`](../docs/email.md)**. Тестирование: [`docs/email-testing.md`](../docs/email-testing.md).
 
 ## Команды Telegram
 
