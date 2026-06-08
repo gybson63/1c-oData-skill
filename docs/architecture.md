@@ -1,7 +1,8 @@
 # Архитектура проекта 1c-oData-skill
 
 > Описание архитектурных решений для тех, кто проектирует и эксплуатирует AI-агентов.
-> Проект — Telegram-бот, который позволяет пользователям делать запросы к данным 1С:Предприятие через OData REST API, используя AI для формирования запросов и форматирования ответов.
+> Структура каталогов: [`project-structure.md`](project-structure.md). SearXNG: [`searxng.md`](searxng.md).
+> Проект — Telegram- и email-бот, который позволяет пользователям делать запросы к данным 1С:Предприятие через OData REST API, используя AI для формирования запросов и форматирования ответов.
 
 ---
 
@@ -130,9 +131,10 @@ shutdown() → post_shutdown() → shutdown_agents()
 
 Агент-аналитик метаданных. Определяет объекты конфигурации для OData через MCP `conf_doc_*` и profile MD (`skills/analyst/profiles/`).
 
-- Standalone: `/analyze`, `[analyze]`
+- Standalone: `/analyze`, `[analyze]` (email)
 - Pre-step: результат вставляется в OData Step 1 как блок «АНАЛИЗ МЕТАДАННЫХ»
 - Выход: `MetadataBrief` (intent, primary/secondary objects, avoid)
+- **SearXNG** (`searxng_web_search`, `web_url_read`) — только после conf-doc gating; см. [`searxng.md`](searxng.md)
 
 ### ODataAgent
 

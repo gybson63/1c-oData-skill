@@ -28,7 +28,7 @@ description: >-
 - [ ] Drill-down: conf_doc_get_object → conf_doc_get_object_chunk
 - [ ] Для отчётов: чанки «Запрос СКД» → регистры-источники
 - [ ] Сверить с profile (decision trees, anti-patterns)
-- [ ] SearXNG — только если conf_doc + profile не хватило (не раньше conf_doc_search!)
+- [ ] SearXNG — только если conf_doc + profile не хватило (см. [`docs/searxng.md`](../../docs/searxng.md))
 - [ ] Выдать MetadataBrief
 ```
 
