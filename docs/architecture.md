@@ -308,7 +308,7 @@ env.json → agents.odata.conf_doc
 {
   "mcp_servers": { "conf-doc": { "...": "shared" } },
   "agents": {
-    "analyst": { "mcp_inherit": true, "mcp_servers": { "web-search": { "enabled": false } } },
+    "analyst": { "mcp_inherit": true, "mcp_servers": { "searxng": { "enabled": false } } },
     "odata": { "mcp_inherit": true, "mcp_servers": { "odata": { "...": "..." } } }
   }
 }

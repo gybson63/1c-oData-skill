@@ -121,7 +121,7 @@ bot/
 | Standalone | `/analyze <вопрос>` в Telegram, префикс `[analyze]` в email |
 | Pre-step | `preprocessor_for_odata: true` — блок «АНАЛИЗ МЕТАДАННЫХ» в OData Step 1 |
 
-**MCP:** shared серверы в `profiles.default.mcp_servers`, per-agent в `agents.analyst.mcp_servers` (merge через `bot/mcp_config.py`).
+**MCP:** shared серверы в `profiles.default.mcp_servers`, per-agent в `agents.analyst.mcp_servers` (merge через `bot/mcp_config.py`). Опционально `searxng` (`mcp-searxng`) для веб-поиска внешней документации 1С.
 
 ### conf-doc (обогащение Step 1)
 

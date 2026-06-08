@@ -1,0 +1,12 @@
+use_default_settings: true
+
+search:
+  safe_search: 0
+  formats:
+    - html
+    - json
+
+server:
+  secret_key: "replace-with-python-secrets-token_hex-32"
+  limiter: false
+  image_proxy: true

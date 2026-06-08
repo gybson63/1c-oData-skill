@@ -29,11 +29,11 @@ def test_agent_override_shared_disabled():
     profile = {"mcp_servers": {"conf-doc": {"command": "a"}}}
     agent = {
         "mcp_inherit": True,
-        "mcp_servers": {"web-search": {"enabled": False, "command": "npx"}},
+        "mcp_servers": {"searxng": {"enabled": False, "command": "npx"}},
     }
     result = resolve_mcp_config(profile, agent)
     assert "conf-doc" in result
-    assert "web-search" not in result
+    assert "searxng" not in result
 
 
 def test_no_inherit():

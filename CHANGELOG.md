@@ -10,10 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Workflow разработки: правило Cursor, CHANGELOG, conventional commits, pre-commit hooks, release script и GitHub Release workflow.
+- MCP SearXNG для аналитика (`mcp-searxng`): Docker Compose, preflight/gating conf-doc, eval-скрипт блока 2.
 
 ### Changed
 
+- Аналитик: приоритет conf-doc над SearXNG; `max_tool_iterations` по умолчанию 12.
+
 ### Fixed
+
+- `build_global_config`: передача `profile_config` для наследования shared MCP (conf-doc).
 
 ### Removed
 

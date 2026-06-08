@@ -30,7 +30,25 @@ _DEFAULT_ALLOWED_TOOLS = [
     "conf_doc_list_objects",
     "conf_doc_list_configurations",
     "conf_doc_health",
+    "searxng_web_search",
+    "web_url_read",
 ]
+
+_CONF_DOC_DEPTH_TOOLS = frozenset(
+    {
+        "conf_doc_search",
+        "conf_doc_get_object",
+        "conf_doc_get_object_chunk",
+        "conf_doc_query",
+        "conf_doc_list_objects",
+    }
+)
+_WEB_SEARCH_TOOLS = frozenset({"searxng_web_search", "web_url_read"})
+_CONF_DOC_GATE_MSG = (
+    "Сначала выполни conf_doc_search (keyword) и при необходимости "
+    "conf_doc_get_object / conf_doc_get_object_chunk. "
+    "SearXNG и submit_metadata_brief доступны только после conf-doc."
+)
 
 
 class AnalystService:
@@ -62,6 +80,12 @@ class AnalystService:
                     tools.append(t)
         return tools
 
+    def _conf_doc_required(self) -> bool:
+        if not self._mcp or not self._mcp.is_connected():
+            return False
+        allowed = set(self._settings.allowed_mcp_tools or _DEFAULT_ALLOWED_TOOLS)
+        return any(t in allowed for t in _CONF_DOC_DEPTH_TOOLS)
+
     async def analyze(
         self,
         user_text: str,
@@ -91,6 +115,8 @@ class AnalystService:
             {"role": "user", "content": user_text},
         ]
         tools = self._build_tools()
+        conf_doc_explored = await self._preflight_conf_doc(user_text, messages)
+        require_conf_doc = self._conf_doc_required()
 
         for iteration in range(self._settings.max_tool_iterations):
             await self._rate_limiter.wait()
@@ -134,6 +160,15 @@ class AnalystService:
                         args = {}
 
                     if fname == "submit_metadata_brief":
+                        if require_conf_doc and not conf_doc_explored:
+                            messages.append(
+                                {
+                                    "role": "tool",
+                                    "tool_call_id": tc.id,
+                                    "content": _CONF_DOC_GATE_MSG,
+                                }
+                            )
+                            continue
                         brief = MetadataBrief.from_dict(args)
                         self._fill_odata_entities(brief)
                         log.info(
@@ -144,7 +179,12 @@ class AnalystService:
                         )
                         return brief
 
-                    result = await self._call_mcp_tool(fname, args)
+                    if fname in _WEB_SEARCH_TOOLS and require_conf_doc and not conf_doc_explored:
+                        result = _CONF_DOC_GATE_MSG
+                    else:
+                        result = await self._call_mcp_tool(fname, args)
+                        if fname in _CONF_DOC_DEPTH_TOOLS:
+                            conf_doc_explored = True
                     messages.append(
                         {
                             "role": "tool",
@@ -162,6 +202,43 @@ class AnalystService:
                     return parsed
 
         return MetadataBrief()
+
+    async def _preflight_conf_doc(
+        self,
+        user_text: str,
+        messages: list[dict[str, Any]],
+    ) -> bool:
+        """Обязательный conf_doc_search до AI-loop (keyword из вопроса)."""
+        if not self._conf_doc_required():
+            return False
+
+        queries = build_conf_doc_search_queries(user_text)[:2]
+        if not queries:
+            return False
+
+        blocks: list[str] = []
+        for query in queries:
+            result = await self._call_mcp_tool("conf_doc_search", {"query": query, "top_k": 5})
+            if result.startswith("Ошибка MCP") or result.startswith("Неизвестный инструмент"):
+                log.warning("Analyst preflight conf_doc_search(%r) failed: %s", query, result[:200])
+                continue
+            blocks.append(f"### conf_doc_search({query!r})\n{result[:6000]}")
+
+        if not blocks:
+            return False
+
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    "Предварительные результаты conf-doc (preflight). Сверь с profile; "
+                    "при необходимости — conf_doc_get_object / conf_doc_get_object_chunk. "
+                    "SearXNG только если этого контекста недостаточно.\n\n" + "\n\n".join(blocks)
+                ),
+            }
+        )
+        log.info("Analyst preflight: %d conf_doc_search queries", len(blocks))
+        return True
 
     async def _call_mcp_tool(self, name: str, arguments: dict[str, Any]) -> str:
         if not self._mcp:
