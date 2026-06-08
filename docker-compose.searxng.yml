@@ -1,0 +1,26 @@
+# SearXNG для MCP web-search аналитика (mcp-searxng).
+#
+# Запуск:
+#   docker compose -f docker-compose.searxng.yml up -d
+#   docker compose -f docker-compose.searxng.yml logs -f searxng
+#
+# Проверка JSON API:
+#   curl "http://localhost:8080/search?q=test&format=json"
+
+services:
+  searxng:
+    container_name: 1c-odata-searxng
+    image: docker.io/searxng/searxng:latest
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ./docker/searxng:/etc/searxng:rw
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8080/
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID

@@ -1,0 +1,18 @@
+---
+description: >-
+  Агент-аналитик 1С: выбор объектов метаданных через MCP conf-doc и profile.
+  Применять при /analyze, [analyze], вопросах «какие объекты», «разбери метаданные».
+alwaysApply: false
+---
+
+# analyst: анализ метаданных 1С
+
+Прочитай skills:
+
+1. [`skills/analyst/SKILL.md`](../../skills/analyst/SKILL.md) — workflow и MetadataBrief
+2. [`skills/analyst-conf-doc/SKILL.md`](../../skills/analyst-conf-doc/SKILL.md) — MCP conf-doc
+3. Profile конфигурации из `skills/analyst/profiles/` (ЗУП: `zup-korp.md`)
+
+MCP: подключи `1c-conf-doc` из `.cursor/mcp.json`. Опционально `searxng` (`mcp-searxng`) для внешней документации 1С.
+
+**Не** выполняй OData-запросы — только анализ объектов.

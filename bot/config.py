@@ -155,7 +155,7 @@ class AnalystSettings(BaseModel):
         description="Путь к profile MD конфигурации",
     )
     mcp_inherit: bool = Field(default=True, description="Наследовать shared mcp_servers профиля")
-    max_tool_iterations: int = Field(default=8, description="Макс. итераций MCP tool loop")
+    max_tool_iterations: int = Field(default=12, description="Макс. итераций MCP tool loop")
     allowed_mcp_tools: list[str] = Field(
         default_factory=lambda: [
             "conf_doc_search",
@@ -164,6 +164,8 @@ class AnalystSettings(BaseModel):
             "conf_doc_list_objects",
             "conf_doc_list_configurations",
             "conf_doc_health",
+            "searxng_web_search",
+            "web_url_read",
         ],
         description="Whitelist MCP-инструментов аналитика",
     )
@@ -184,6 +186,8 @@ _DEFAULT_ALLOWED_TOOLS = [
     "conf_doc_list_objects",
     "conf_doc_list_configurations",
     "conf_doc_health",
+    "searxng_web_search",
+    "web_url_read",
 ]
 
 
@@ -195,7 +199,7 @@ def parse_analyst_settings(raw: dict[str, Any] | None) -> AnalystSettings:
     return AnalystSettings(
         profile_path=raw.get("profile_path", AnalystSettings.model_fields["profile_path"].default),
         mcp_inherit=raw.get("mcp_inherit", True),
-        max_tool_iterations=int(raw.get("max_tool_iterations", 8)),
+        max_tool_iterations=int(raw.get("max_tool_iterations", 12)),
         allowed_mcp_tools=list(raw.get("allowed_mcp_tools") or _DEFAULT_ALLOWED_TOOLS),
         preprocessor_for_odata=raw.get("preprocessor_for_odata", True),
         conf_doc_fallback=parse_conf_doc_settings(fallback_raw),
@@ -309,14 +313,15 @@ class AppSettings(BaseModel):
         default=10, description="Максимальное число пар в истории (legacy, используйте history.max_turns)"
     )
 
-    # Agents config (сырой dict — для передачи в BaseAgent.initialize)
+    # Agents config (raw, for backward compatibility with BaseAgent.initialize)
     agents_config: dict[str, dict[str, Any]] = Field(
         default_factory=dict,
         description="Конфигурация агентов (секция 'agents' из env.json)",
     )
-
-    # Profile-level data needed for agent init backward compat
-    _profile_raw: dict[str, Any] = {}
+    profile_raw: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Сырой профиль env.json (для MCP inherit и global_config)",
+    )
 
     class Config:
         arbitrary_types_allowed = True
@@ -551,6 +556,7 @@ def _build_settings(p: dict[str, Any]) -> AppSettings:
         log_file=p.get("log_file"),
         history_max_turns=history.max_turns,
         agents_config=agents_config,
+        profile_raw=p,
     )
 
 
@@ -573,6 +579,7 @@ def build_global_config(settings: AppSettings) -> dict[str, Any]:
         "ai_temperature": settings.ai.temperature,
         "ai_temperature_step2": settings.ai.temperature_step2,
         "history_max_turns": settings.history_max_turns,
+        "profile_config": settings.profile_raw,
     }
 
 

@@ -6,6 +6,7 @@ import pytest
 
 from bot.config import (
     AISettings,
+    AnalystSettings,
     AppSettings,
     BotSettings,
     FormatterSettings,
@@ -14,6 +15,7 @@ from bot.config import (
     build_global_config,
     get_settings,
     load_settings,
+    parse_analyst_settings,
 )
 from bot_lib.exceptions import ConfigError
 
@@ -158,6 +160,8 @@ class TestBuildGlobalConfig:
         assert gc["ai_temperature"] == 0.1
         assert gc["ai_temperature_step2"] == 0.3
         assert gc["history_max_turns"] == 10
+        assert "profile_config" in gc
+        assert gc["profile_config"] is settings.profile_raw
 
 
 # =========================================================================
@@ -207,3 +211,14 @@ class TestModelDefaults:
         assert app.log_level == "INFO"
         assert app.log_file is None
         assert app.history_max_turns == 10
+
+
+class TestAnalystSettings:
+    def test_default_allowed_mcp_tools_includes_searxng(self):
+        settings = AnalystSettings()
+        assert "searxng_web_search" in settings.allowed_mcp_tools
+        assert "web_url_read" in settings.allowed_mcp_tools
+
+    def test_parse_analyst_settings_empty(self):
+        settings = parse_analyst_settings(None)
+        assert "searxng_web_search" in settings.allowed_mcp_tools

@@ -7,8 +7,14 @@
         "CONF_DOC_API_URL": "http://localhost:8050",
         "CONF_DOC_CONFIGURATION": "ЗарплатаИУправлениеПерсоналомКОРП"
       }
+    },
+    "searxng": {
+      "command": "npx",
+      "args": ["-y", "mcp-searxng"],
+      "env": {
+        "SEARXNG_URL": "http://localhost:8080"
+      }
     }
   },
-  "_comment_web_search": "Optional: @modelcontextprotocol/server-brave-search for analyst external docs",
   "_comment_document_reader": "Optional: @modelcontextprotocol/server-filesystem for books/PDF"
 }
