@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Literal
+from typing import Literal, cast
 
 import pandas as pd
 
@@ -141,7 +141,7 @@ def optimize_chart_type(
             temporal_x,
             part_whole,
         )
-        return chart.model_copy(update={"type": new_type})
+        return cast(ChartSpec, chart.model_copy(update={"type": new_type}))
     return chart
 
 

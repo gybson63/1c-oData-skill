@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import pandas as pd
 
@@ -231,14 +231,17 @@ class VisualizationAdvisor:
                 user_query=user_query,
                 pie_max_categories=self._pie_max_categories,
             )
-            return decision.model_copy(update={"chart": chart})
+            return cast(VisualizationDecision, decision.model_copy(update={"chart": chart}))
         if decision.show_chart and (not chart or not _is_chartable(df, chart, max_categories=self._max_categories)):
-            return decision.model_copy(
-                update={
-                    "show_chart": False,
-                    "chart": None,
-                    "reason": decision.reason + " (график отключён: данные не подходят)",
-                }
+            return cast(
+                VisualizationDecision,
+                decision.model_copy(
+                    update={
+                        "show_chart": False,
+                        "chart": None,
+                        "reason": decision.reason + " (график отключён: данные не подходят)",
+                    }
+                ),
             )
         return decision
 
