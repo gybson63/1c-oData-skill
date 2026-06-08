@@ -11,7 +11,7 @@
 ### Данные 1С на естественном языке
 
 - Telegram- и email-бот: вопрос на русском → данные из базы 1С без ручных запросов
-- Двухшаговый AI-пайплайн: формирование OData-запроса → форматирование ответа
+- Мультиагентный AI-пайплайн: **аналитик метаданных** (опционально) → **OData** (формирование запроса) → **форматтер** (оформление ответа)
 - Подбор сущности по смыслу вопроса, подсчёт записей (`/$count`), раскрытие ссылок через `$expand`
 - Учёт токенов и стоимости по сессии (`/tokens`)
 
@@ -27,8 +27,8 @@
 
 ### Аналитик метаданных
 
-- `/analyze` в Telegram, `[analyze]` в email — выбор объектов конфигурации для OData
-- Preprocessor для OData: блок MetadataBrief перед Step 1
+- Первый этап пайплайна (pre-step): conf-doc + profile → MetadataBrief для OData Step 1
+- Отдельный режим: `/analyze` в Telegram, `[analyze]` в email — без запроса данных
 - Domain profiles (ЗУП КОРП и др.): decision trees, anti-patterns
 
 Подробнее: [`skills/analyst/SKILL.md`](skills/analyst/SKILL.md).
