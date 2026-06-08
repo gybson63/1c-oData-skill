@@ -1,0 +1,21 @@
+{
+  "mcpServers": {
+    "1c-odata": {
+      "command": "python",
+      "args": ["mcp_servers/odata_server.py"],
+      "env": {
+        "ODATA_URL": "http://localhost/YourBaseName/odata/standard.odata",
+        "ODATA_USER": "Администратор",
+        "ODATA_PASSWORD": "пароль"
+      }
+    },
+    "1c-conf-doc": {
+      "command": "C:\\ПервыйБИТ\\ИИ\\1c-conf-doc\\.venv\\Scripts\\python.exe",
+      "args": ["-m", "onec_conf_doc.mcp"],
+      "env": {
+        "CONF_DOC_API_URL": "http://localhost:8050",
+        "CONF_DOC_CONFIGURATION": "ЗарплатаИУправлениеПерсоналомКОРП"
+      }
+    }
+  }
+}

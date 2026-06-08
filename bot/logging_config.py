@@ -43,6 +43,7 @@ import uuid
 from datetime import datetime
 from io import TextIOWrapper
 from pathlib import Path
+from typing import Any, cast
 
 import structlog
 from structlog.stdlib import ProcessorFormatter
@@ -265,7 +266,7 @@ def _configure_structlog(json_format: bool = False) -> ProcessorFormatter:
         ProcessorFormatter для stdlib logging handlers.
     """
     if json_format:
-        renderer = structlog.processors.JSONRenderer(ensure_ascii=False)
+        renderer: Any = structlog.processors.JSONRenderer(ensure_ascii=False)
     else:
         renderer = structlog.dev.ConsoleRenderer(
             colors=True,
@@ -434,4 +435,4 @@ def get_structlog(name: str | None = None) -> structlog.stdlib.BoundLogger:
     Returns:
         BoundLogger с настроенными processors.
     """
-    return structlog.get_logger(name)
+    return cast(structlog.stdlib.BoundLogger, structlog.get_logger(name))

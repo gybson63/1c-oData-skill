@@ -33,7 +33,14 @@ _ODATA_ERROR_CODES: dict[str, str] = {
 }
 
 _SEGMENT_RE = re.compile(r"Сегмент пути\s+(\S+)\s+не найден", re.I)
-_ZUP_DEPT_ALIASES = frozenset({"Подразделение", "Подразделение_Key"})
+_ZUP_DEPT_ALIASES = frozenset(
+    {
+        "Подразделение",
+        "Подразделение_Key",
+        "ПодразделениеОрганизации",
+        "ПодразделениеОрганизации_Key",
+    }
+)
 
 
 class QueryError(Exception):
@@ -46,6 +53,13 @@ def _refine_odata_code6_hint(code: str, message_value: str) -> str:
         return _ODATA_ERROR_CODES.get(code, message_value)
 
     lower = message_value.lower()
+    if "метод не найден" in lower:
+        return (
+            "Виртуальная таблица не опубликована в OData этой базы "
+            "(часто /Balance() — попробуйте /Turnovers() или _RecordType). "
+            f"({message_value})"
+        )
+
     if "лишние сегменты" in lower:
         return (
             "Запрос отклонён — часто это $expand или навигация в $select (Nav/Description) "
@@ -58,7 +72,9 @@ def _refine_odata_code6_hint(code: str, message_value: str) -> str:
         seg = seg_match.group(1)
         if seg in _ZUP_DEPT_ALIASES:
             return (
-                f"Поле «{seg}» не найдено — в ЗУП используйте ПодразделениеОрганизации / ПодразделениеОрганизации_Key."
+                f"Поле «{seg}» не найдено в OData этой базы — проверьте get_entity_fields: "
+                "в публикации может быть Подразделение / Подразделение_Key "
+                "или ПодразделениеОрганизации / ПодразделениеОрганизации_Key."
             )
         return (
             f"Сегмент «{seg}» не найден — проверьте имя поля, навигационного свойства или виртуальной таблицы в entity."

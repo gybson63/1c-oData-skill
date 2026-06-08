@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 from urllib.parse import quote
 
-from bot.agents.odata.field_aliases import normalize_nav_property
+from bot.agents.odata.field_aliases import resolve_nav_property
 
 log = logging.getLogger(__name__)
 
@@ -126,6 +126,7 @@ def build_expand(
         Строка ``$expand`` или ``None``.
     """
     nav_names: list[str] = []
+    available = frozenset(entity_fields)
 
     if select:
         raw = select[len("$select=") :] if select.startswith("$select=") else select
@@ -135,8 +136,9 @@ def build_expand(
 
     for f in field_names:
         if f.endswith("_Key") and f not in _SKIP_KEY_FIELDS:
-            nav_name = normalize_nav_property(f[:-4])  # убрать суффикс _Key
-            nav_names.append(nav_name)
+            nav_name = resolve_nav_property(f[:-4], available)
+            if nav_name in available:
+                nav_names.append(nav_name)
 
     if not nav_names:
         return None

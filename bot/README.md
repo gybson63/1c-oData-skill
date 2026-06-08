@@ -13,13 +13,8 @@ bot/
 └── agents/
     ├── __init__.py
     ├── base.py             # Абстрактный класс BaseAgent
-    │
+    ├── analyst/            # Аналитик метаданных (MCP conf-doc → MetadataBrief)
     └── odata/              # OData-агент
-        ├── __init__.py
-        ├── agent.py        # Класс ODataAgent (двухшаговая обработка)
-        ├── prompts.py      # Системные промпты и справочник OData
-        ├── metadata.py     # Загрузка и кэширование $metadata
-        └── odata_http.py   # HTTP-запросы к OData API
 ```
 
 ## Архитектура агентов
@@ -88,11 +83,26 @@ bot/
           "odata_url": "http://host/base/odata/standard.odata",
           "odata_user": "Администратор",
           "odata_password": "пароль",
+          "conf_doc": {
+            "enabled": true,
+            "api_url": "http://localhost:8050",
+            "configuration": "ЗарплатаИУправлениеПерсоналомКОРП",
+            "enrich_prompt": true,
+            "search_top_k": 5
+          },
           "mcp_servers": {
             "odata": {
               "command": "python",
               "args": ["mcp_servers/odata_server.py"],
               "env": { ... }
+            },
+            "conf-doc": {
+              "command": "C:\\ПервыйБИТ\\ИИ\\1c-conf-doc\\.venv\\Scripts\\python.exe",
+              "args": ["-m", "onec_conf_doc.mcp"],
+              "env": {
+                "CONF_DOC_API_URL": "http://localhost:8050",
+                "CONF_DOC_CONFIGURATION": "ЗарплатаИУправлениеПерсоналомКОРП"
+              }
             }
           }
         }
@@ -101,6 +111,25 @@ bot/
   }
 }
 ```
+
+### AnalystAgent (анализ метаданных)
+
+Агент `analyst` определяет релевантные объекты метаданных через MCP `conf_doc_*` и profile MD (`skills/analyst/profiles/`).
+
+| Режим | Как |
+|-------|-----|
+| Standalone | `/analyze <вопрос>` в Telegram, префикс `[analyze]` в email |
+| Pre-step | `preprocessor_for_odata: true` — блок «АНАЛИЗ МЕТАДАННЫХ» в OData Step 1 |
+
+**MCP:** shared серверы в `profiles.default.mcp_servers`, per-agent в `agents.analyst.mcp_servers` (merge через `bot/mcp_config.py`).
+
+### conf-doc (обогащение Step 1)
+
+Поле `configuration` — точное **`name`** из `GET http://localhost:8050/configurations` (имя в метаданных, например `ЗарплатаИУправлениеПерсоналомКОРП`), не человекочитаемый synonym.
+
+Секция `conf_doc` в конфиге агента `odata` включает семантический поиск по метаданным конфигурации перед построением OData-запроса. Бот обращается к HTTP API напрямую (`bot_lib/conf_doc_client.py`), без зависимости от venv 1c-conf-doc — это работает и в Docker (`api_url: http://host.docker.internal:8050`).
+
+При `enabled: true` и `enrich_prompt: true` в логах появится `conf_doc: enriched prompt with N results`.
 
 ## Логирование и метрики
 

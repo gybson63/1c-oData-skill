@@ -25,7 +25,7 @@ from bot_lib.exceptions import ODataHTTPError
 
 def test_normalize_nav_select_to_key():
     raw = "Сотрудник/Description,Должность/Description,Подразделение/Description"
-    assert normalize_nav_select(raw) == ("Сотрудник_Key,Должность_Key,ПодразделениеОрганизации_Key")
+    assert normalize_nav_select(raw) == ("Сотрудник_Key,Должность_Key,Подразделение_Key")
 
 
 def test_is_virtual_table_entity():

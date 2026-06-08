@@ -28,7 +28,8 @@ from bot.agents.odata.pipeline import ODataPipeline
 from bot.agents.odata.prompts import ODATA_REFERENCE, make_step1_tools
 from bot.agents.odata.query_executor import QueryExecutor
 from bot.agents.odata.query_validator import QueryValidator
-from bot.config import get_settings
+from bot.config import get_settings, parse_conf_doc_settings
+from bot.mcp_config import resolve_mcp_config
 from bot.messages import AgentProcessResult
 from bot.utils import RateLimiter, esc_html
 from bot_lib.exceptions import ODataError
@@ -55,6 +56,13 @@ class ODataAgent(BaseAgent):
         self._history_max_turns: int = 10
         self._default_top: int = 20
         self._request_timeout: int = 60
+        self._analyst_service: Any = None
+
+    def set_analyst_service(self, service: Any) -> None:
+        """Подключить AnalystService для pre-step анализа метаданных."""
+        self._analyst_service = service
+        if self._pipeline:
+            self._pipeline.set_analyst_service(service)
 
     def _auth_header(self) -> str:
         import base64
@@ -136,11 +144,14 @@ class ODataAgent(BaseAgent):
             max_analytics_joins=odata.max_analytics_joins,
             chart_max_categories=odata.chart_max_categories,
             config_hint_path=agent_config.get("config_hint_path"),
+            conf_doc=parse_conf_doc_settings(agent_config.get("conf_doc")),
+            analyst_service=self._analyst_service,
         )
 
         self._error_handler = ErrorHandler(max_history_turns=self._history_max_turns)
 
-        mcp_config = agent_config.get("mcp_servers", {})
+        profile_cfg = global_config.get("profile_config") or {}
+        mcp_config = resolve_mcp_config(profile_cfg, agent_config)
         if mcp_config:
             from bot.mcp_client import MCPClientManager
 

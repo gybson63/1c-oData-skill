@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "1c-conf-doc": {
+      "command": "C:\\ПервыйБИТ\\ИИ\\1c-conf-doc\\.venv\\Scripts\\python.exe",
+      "args": ["-m", "onec_conf_doc.mcp"],
+      "env": {
+        "CONF_DOC_API_URL": "http://localhost:8050",
+        "CONF_DOC_CONFIGURATION": "ЗарплатаИУправлениеПерсоналомКОРП"
+      }
+    }
+  },
+  "_comment_web_search": "Optional: @modelcontextprotocol/server-brave-search for analyst external docs",
+  "_comment_document_reader": "Optional: @modelcontextprotocol/server-filesystem for books/PDF"
+}

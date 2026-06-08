@@ -35,7 +35,7 @@ def test_normalize_field_alias():
 
 def test_normalize_nav_select_to_key_fields():
     assert normalize_nav_select("Сотрудник/Description,Подразделение/Description") == (
-        "Сотрудник_Key,ПодразделениеОрганизации_Key"
+        "Сотрудник_Key,Подразделение_Key"
     )
 
 
@@ -58,7 +58,7 @@ def test_normalize_query_dict_analytics_group_by():
         "aggregate": {"group_by": ["Подразделение_Key"], "agg": {"cnt": "count"}},
     }
     out = normalize_query_dict(data)
-    assert out["aggregate"]["group_by"] == ["ПодразделениеОрганизации_Key"]
+    assert out["aggregate"]["group_by"] == ["Подразделение_Key"]
 
 
 def test_apply_step1_normalizes_department_field():
@@ -73,7 +73,7 @@ def test_apply_step1_normalizes_department_field():
     )
     assert ok
     assert state.query
-    assert "ПодразделениеОрганизации_Key" in (state.query.select or "")
+    assert "Подразделение_Key" in (state.query.select or "")
 
 
 def test_load_config_hint():
@@ -92,7 +92,8 @@ def test_parse_odata_error_code6_department():
         status_code=400,
     )
     msg = parse_odata_error_message(err)
-    assert "ПодразделениеОрганизации" in msg
+    assert "get_entity_fields" in msg
+    assert "Подразделение" in msg
 
 
 def test_parse_odata_error_code6_extra_segments():

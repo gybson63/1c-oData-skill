@@ -8,14 +8,17 @@ description: Анализ структуры конфигурации 1С:Пре
 ## Описание
 
 Скилл для анализа структуры конфигурации 1С:Предприятие.
-Поддерживает два источника данных:
+Поддерживает три источника данных:
 
 | Источник | Когда использовать |
 |----------|-------------------|
+| **MCP 1c-conf-doc** (`conf_doc_*`) | Подключён MCP и backend доступен — семантический поиск по полной выгрузке |
 | **XML-выгрузка** (`Configuration.xml`) | Есть выгрузка конфигурации в файлы |
 | **OData `$metadata`** | Нет выгрузки, но есть опубликованная база |
 
-**Приоритет**: сначала ищи `Configuration.xml`. Если файла нет — используй OData.
+**Приоритет**: сначала MCP conf-doc (если подключён), затем `Configuration.xml`, затем OData `$metadata`.
+
+См. [`skills/conf-doc/SKILL.md`](../conf-doc/SKILL.md).
 
 ---
 
@@ -139,11 +142,15 @@ python skills/1cconfinfo/scripts/odata-cfg-info.py -EnvProfile prod
 ## Алгоритм выбора источника
 
 ```
-1. Есть ли Configuration.xml (или папка с ним)?
-   ДА → использовать cf-info (полная информация)
+1. Подключён ли MCP 1c-conf-doc и conf_doc_health OK?
+   ДА → conf_doc_search / conf_doc_get_object / conf_doc_get_object_chunk
    НЕТ → перейти к п.2
 
-2. Есть ли env.json с odata_url?
+2. Есть ли Configuration.xml (или папка с ним)?
+   ДА → использовать cf-info (полная информация)
+   НЕТ → перейти к п.3
+
+3. Есть ли env.json с odata_url?
    ДА → использовать odata-cfg-info.py (опубликованные объекты)
    НЕТ → попросить пользователя указать путь к выгрузке или настроить env.json
 ```

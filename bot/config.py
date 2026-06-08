@@ -122,6 +122,86 @@ class MCPConfig(BaseModel):
     env: dict[str, str] = Field(default_factory=dict)
 
 
+class ConfDocSettings(BaseModel):
+    """Настройки интеграции с conf-doc (семантический поиск по метаданным 1С)."""
+
+    enabled: bool = Field(default=False, description="Включить интеграцию с conf-doc")
+    api_url: str = Field(default="", description="Base URL conf-doc API (без завершающего /)")
+    configuration: str = Field(default="", description="Имя конфигурации из /configurations")
+    enrich_prompt: bool = Field(default=True, description="Обогащать Step 1 промпт результатами search")
+    search_top_k: int = Field(default=5, description="Число результатов search для обогащения")
+    timeout: float = Field(default=60.0, description="Таймаут HTTP-запросов к conf-doc, сек")
+
+
+def parse_conf_doc_settings(raw: dict[str, Any] | None) -> ConfDocSettings:
+    """Разобрать секцию conf_doc из конфига агента."""
+    if not raw:
+        return ConfDocSettings()
+    return ConfDocSettings(
+        enabled=raw.get("enabled", False),
+        api_url=raw.get("api_url", ""),
+        configuration=raw.get("configuration", ""),
+        enrich_prompt=raw.get("enrich_prompt", True),
+        search_top_k=raw.get("search_top_k", 5),
+        timeout=float(raw.get("timeout", 60)),
+    )
+
+
+class AnalystSettings(BaseModel):
+    """Настройки агента-аналитика метаданных 1С."""
+
+    profile_path: str = Field(
+        default="skills/analyst/profiles/zup-korp.md",
+        description="Путь к profile MD конфигурации",
+    )
+    mcp_inherit: bool = Field(default=True, description="Наследовать shared mcp_servers профиля")
+    max_tool_iterations: int = Field(default=8, description="Макс. итераций MCP tool loop")
+    allowed_mcp_tools: list[str] = Field(
+        default_factory=lambda: [
+            "conf_doc_search",
+            "conf_doc_get_object",
+            "conf_doc_get_object_chunk",
+            "conf_doc_list_objects",
+            "conf_doc_list_configurations",
+            "conf_doc_health",
+        ],
+        description="Whitelist MCP-инструментов аналитика",
+    )
+    preprocessor_for_odata: bool = Field(
+        default=True,
+        description="Запускать аналитик как pre-step перед OData Step 1",
+    )
+    conf_doc_fallback: ConfDocSettings = Field(
+        default_factory=ConfDocSettings,
+        description="HTTP fallback при недоступности MCP conf-doc",
+    )
+
+
+_DEFAULT_ALLOWED_TOOLS = [
+    "conf_doc_search",
+    "conf_doc_get_object",
+    "conf_doc_get_object_chunk",
+    "conf_doc_list_objects",
+    "conf_doc_list_configurations",
+    "conf_doc_health",
+]
+
+
+def parse_analyst_settings(raw: dict[str, Any] | None) -> AnalystSettings:
+    """Разобрать секцию конфига агента analyst."""
+    if not raw:
+        return AnalystSettings()
+    fallback_raw = raw.get("conf_doc_fallback") or raw.get("conf_doc")
+    return AnalystSettings(
+        profile_path=raw.get("profile_path", AnalystSettings.model_fields["profile_path"].default),
+        mcp_inherit=raw.get("mcp_inherit", True),
+        max_tool_iterations=int(raw.get("max_tool_iterations", 8)),
+        allowed_mcp_tools=list(raw.get("allowed_mcp_tools") or _DEFAULT_ALLOWED_TOOLS),
+        preprocessor_for_odata=raw.get("preprocessor_for_odata", True),
+        conf_doc_fallback=parse_conf_doc_settings(fallback_raw),
+    )
+
+
 class ModelPricing(BaseModel):
     """Цены для конкретной модели AI за 1M токенов (USD)."""
 

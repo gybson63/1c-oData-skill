@@ -19,8 +19,12 @@ from bot.agents.odata.field_aliases import normalize_field_name, normalize_nav_s
 from bot.agents.odata.odata_http import execute_odata_query
 from bot.agents.odata.odata_query_utils import (
     dedupe_records_by_field,
+    information_register_record_type_entity,
     is_odata_code6_extra_segments,
+    is_odata_code6_segment_not_found,
     key_columns_from_select,
+    next_accumulation_vt_entity,
+    record_type_orderby,
     slice_last_record_type_entity,
 )
 from bot_lib.exceptions import ODataError
@@ -143,7 +147,35 @@ class QueryExecutor:
                 inline_count=True,
             )
         except ODataError as exc:
-            if count or not is_odata_code6_extra_segments(exc):
+            if count:
+                raise
+            if not is_odata_code6_extra_segments(exc):
+                alt_vt = next_accumulation_vt_entity(entity, exc)
+                if alt_vt:
+                    log.info("OData VT fallback: %s → %s", entity, alt_vt)
+                    return await self._run_query_with_code6_fallback(
+                        entity=alt_vt,
+                        filter_expr=filter_expr,
+                        select=select,
+                        orderby=orderby,
+                        top=top,
+                        skip=skip,
+                        expand=None,
+                        count=count,
+                    )
+                rt_entity = information_register_record_type_entity(entity)
+                if rt_entity and is_odata_code6_segment_not_found(exc):
+                    log.info(
+                        "OData IR fallback: header unsupported, use %s",
+                        rt_entity,
+                    )
+                    return await self._run_record_type_fallback(
+                        rt_entity=rt_entity,
+                        filter_expr=filter_expr,
+                        select=select,
+                        top=top,
+                        skip=skip,
+                    )
                 raise
             first_exc = exc
 
@@ -188,7 +220,7 @@ class QueryExecutor:
                     "OData code 6 fallback: SliceLast unsupported, use %s with Period desc",
                     rt_entity,
                 )
-                return await self._run_slice_last_via_record_type(
+                return await self._run_record_type_fallback(
                     rt_entity=rt_entity,
                     filter_expr=filter_expr,
                     select=select,
@@ -230,7 +262,7 @@ class QueryExecutor:
             records = await self._resolve_key_labels(records, select)
         return records, total
 
-    async def _run_slice_last_via_record_type(
+    async def _run_record_type_fallback(
         self,
         rt_entity: str,
         filter_expr: str | None,
@@ -238,7 +270,7 @@ class QueryExecutor:
         top: int,
         skip: int | None,
     ) -> tuple[list[dict], int]:
-        """Срез последних через ``_RecordType`` + ``$orderby=Period desc`` и dedupe по сотруднику."""
+        """Fallback через ``_RecordType``, orderby по Period/Дата и dedupe."""
         fields: list[str] = []
         if self._metadata is not None:
             try:
@@ -280,11 +312,12 @@ class QueryExecutor:
             )
 
         fetch_top = min(max(top * 30, 50), 500)
+        orderby = record_type_orderby(fields)
         records, _total = await self._run_query(
             entity=rt_entity,
             filter_expr=adapted_filter,
             select=adapted_select,
-            orderby="Period desc",
+            orderby=orderby,
             top=fetch_top,
             skip=skip,
             expand=None,

@@ -68,7 +68,8 @@ def email_chat(email_test_env_json: str):
 
     chat = Chat(
         chat_id=-12345,
-        agent=agent,
+        agents={"odata": agent},
+        default_agent=agent,
         formatter=formatter,
         history_mgr=HistoryManager(persist_dir=None),
     )

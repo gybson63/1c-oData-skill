@@ -10,7 +10,12 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from bot.agents.odata.field_aliases import is_virtual_table_entity, normalize_field_name, normalize_nav_select
+from bot.agents.odata.field_aliases import (
+    is_virtual_table_entity,
+    normalize_expand,
+    normalize_field_name,
+    normalize_nav_select,
+)
 from bot.agents.odata.query_builder import build_expand, trim_expand_for_url_limit
 
 log = logging.getLogger(__name__)
@@ -48,23 +53,32 @@ class QueryValidator:
         top = min(int(query.top) or self._default_top, self._max_top)
         skip = query.skip
 
-        # Валидация $select
         select = self._normalize_list(query.select)
-        select = normalize_nav_select(select)
         orderby = self._normalize_list(query.orderby)
 
         fields = self._metadata.get_entity_fields(query.entity)
+        field_set = frozenset(fields) if fields else frozenset()
         if fields:
             log.info("Fields for %s: %s", query.entity, fields)
+            select = normalize_nav_select(select, field_set)
             select = self._validate_select(fields, select)
             orderby = self._validate_orderby(fields, orderby)
+        elif select:
+            select = normalize_nav_select(select)
 
         # $expand на виртуальных таблицах (SliceLast и т.д.) часто отклоняется 1С
         if is_virtual_table_entity(query.entity):
             expand = None
             log.info("$expand omitted for virtual table entity: %s", query.entity)
+        elif query.expand:
+            expand = normalize_expand(str(query.expand), field_set or None)
+            if field_set and expand:
+                valid = [p for p in expand.split(",") if p.strip() in field_set]
+                expand = ",".join(valid) if valid else None
         else:
             expand = build_expand(query.entity, select, fields, self._max_expand_fields)
+
+        if expand is not None and not is_virtual_table_entity(query.entity):
             expand = trim_expand_for_url_limit(
                 self._odata_url,
                 query.entity,

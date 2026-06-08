@@ -28,6 +28,7 @@ from bot.agents.odata.ai_service import AIService
 from bot.agents.odata.analytics_executor import AnalyticsExecutor
 from bot.agents.odata.attachment_csv import try_handle_csv_attachment
 from bot.agents.odata.chart_renderer import render_html, render_png
+from bot.agents.odata.conf_doc_context import fetch_conf_doc_context
 from bot.agents.odata.config_hint_loader import format_config_hint_block
 from bot.agents.odata.error_handler import QueryError
 from bot.agents.odata.parse_failure import (
@@ -52,6 +53,7 @@ from bot.agents.odata.tool_resolver import (
     ToolResolver,
 )
 from bot.agents.odata.visualization_advisor import VisualizationAdvisor
+from bot.config import ConfDocSettings
 from bot.messages import Attachment
 from bot.utils import esc_html
 from bot_lib.dataframe import dataframe_preview_html
@@ -79,6 +81,8 @@ class ODataPipeline:
         max_analytics_joins: int = 3,
         chart_max_categories: int = 30,
         config_hint_path: str | None = None,
+        conf_doc: ConfDocSettings | None = None,
+        analyst_service: Any | None = None,
     ) -> None:
         self._ai = ai
         self._executor = executor
@@ -92,6 +96,10 @@ class ODataPipeline:
         self._max_analytics_joins = max_analytics_joins
         self._chart_max_categories = chart_max_categories
         self._config_hint_path = config_hint_path
+        self._conf_doc = conf_doc or ConfDocSettings()
+        self._conf_doc_block = ""
+        self._analyst_service = analyst_service
+        self._analyst_block = ""
         self._tools_supported: bool = True
         self._request_brief = RequestBriefAdvisor()
 
@@ -104,10 +112,18 @@ class ODataPipeline:
             InlineJsonResolver(DsmlToolCallResolver(TextToolCallResolver(AutoSearchResolver(metadata=self._metadata))))
         )
 
+    def set_analyst_service(self, service: Any) -> None:
+        """Подключить AnalystService (pre-step)."""
+        self._analyst_service = service
+
     def build_step1_prompt(self) -> str:
         """Построить системный промпт для Шага 1."""
         base = STEP1_SYSTEM.format(metadata=self._metadata.format_entity_list())
         base += format_config_hint_block(self._config_hint_path)
+        if self._analyst_block:
+            base += "\n\n--- АНАЛИЗ МЕТАДАННЫХ (analyst) ---\n" + self._analyst_block + "\n--- КОНЕЦ АНАЛИЗА ---\n"
+        if self._conf_doc_block:
+            base += "\n\n--- КОНТЕКСТ ИЗ ДОКУМЕНТАЦИИ КОНФИГУРАЦИИ (conf-doc) ---\n" + self._conf_doc_block
         if not self._tools_supported:
             ref_lines = [
                 "\n\n--- СПРАВОЧНИК ODATA (инструменты недоступны через function calling, используй текстовый вызов) ---",
@@ -174,6 +190,14 @@ class ODataPipeline:
             state.request_brief.source,
         )
 
+        brief_headline = state.request_brief.headline if state.request_brief else None
+        await self._step_analyze(state, request_brief=brief_headline)
+        self._conf_doc_block = await fetch_conf_doc_context(
+            state.user_text,
+            self._conf_doc,
+            request_brief=brief_headline,
+        )
+
         # Шаг 1: AI формирует OData-запрос
         await self._step_build_query(state)
 
@@ -209,6 +233,27 @@ class ODataPipeline:
         return state
 
     # -- Pipeline steps (potential LangGraph nodes) --
+
+    async def _step_analyze(self, state: ODataState, request_brief: str | None = None) -> None:
+        """Pre-step: AnalystService определяет релевантные объекты метаданных."""
+        self._analyst_block = ""
+        if not self._analyst_service:
+            return
+        try:
+            brief = await self._analyst_service.analyze(
+                state.user_text,
+                chat_id=state.chat_id,
+                request_brief=request_brief,
+            )
+            if brief.primary_objects or brief.intent or brief.notes:
+                self._analyst_block = brief.to_prompt_block()
+                log.info(
+                    "Analyst pre-step: intent=%s, primary=%d",
+                    brief.intent,
+                    len(brief.primary_objects),
+                )
+        except Exception as exc:
+            log.warning("Analyst pre-step failed: %s", exc)
 
     async def _step_build_query(self, state: ODataState) -> None:
         """Шаг 1: AI формирует OData-запрос с разрешением tool calls."""

@@ -24,7 +24,7 @@ _PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-from telegram import Update  # noqa: E402
+from telegram import Message, Update  # noqa: E402
 from telegram.error import BadRequest, NetworkError, TimedOut  # noqa: E402
 from telegram.ext import (  # noqa: E402
     ApplicationBuilder,
@@ -35,6 +35,7 @@ from telegram.ext import (  # noqa: E402
     filters,
 )
 
+from bot.agents.analyst import AnalystAgent  # noqa: E402
 from bot.agents.base import BaseAgent  # noqa: E402
 from bot.agents.formatter import FormatterAgent  # noqa: E402
 from bot.agents.odata import ODataAgent  # noqa: E402
@@ -64,10 +65,8 @@ _chat_mgr: ChatManager | None = None  # единая точка входа дл�
 
 AGENT_REGISTRY: dict[str, type[BaseAgent]] = {
     "odata": ODataAgent,
+    "analyst": AnalystAgent,
     "formatter": FormatterAgent,
-    # Будущие агенты добавляются сюда:
-    # "accounting": AccountingAgent,
-    # "reports": ReportsAgent,
 }
 
 
@@ -94,6 +93,7 @@ async def init_agents(profile_cfg: dict[str, Any], cache_dir: str, env_file: str
         "ai_base_url": profile_cfg.get("ai_base_url"),
         "ai_model": profile_cfg.get("ai_model", "gpt-4o-mini"),
         "ai_rpm": profile_cfg.get("ai_rpm", 20),
+        "profile_config": profile_cfg,
     }
 
     for agent_name, agent_cfg in agents_config.items():
@@ -117,7 +117,18 @@ async def init_agents(profile_cfg: dict[str, Any], cache_dir: str, env_file: str
         except Exception as e:
             log.error("Ошибка инициализации агента '%s': %s", agent_name, e)
 
-    # Авто-инициализация форматтера, если он не задан в конфигурации явно
+    # Связать Analyst → OData pre-step
+    analyst = agents.get("analyst")
+    odata = agents.get("odata")
+    if analyst and odata and hasattr(analyst, "service") and hasattr(odata, "set_analyst_service"):
+        analyst_cfg = agents_config.get("analyst", {})
+        from bot.config import parse_analyst_settings
+
+        if parse_analyst_settings(analyst_cfg).preprocessor_for_odata and analyst.service:
+            odata.set_analyst_service(analyst.service)
+            log.info("ODataAgent: подключён AnalystService (pre-step)")
+
+    # Авто-инициализация форматтера
     if "formatter" not in agents:
         formatter_cfg = profile_cfg.get("formatter", {})
         fmt = FormatterAgent()
@@ -180,6 +191,11 @@ async def shutdown_agents() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _telegram_message(update: Update) -> Message | None:
+    """Вернуть message из update или None для неподдерживаемых типов."""
+    return update.message
+
+
 async def _send_telegram_reply(
     update: Update,
     text: str,
@@ -187,6 +203,11 @@ async def _send_telegram_reply(
     attachments: list | None = None,
 ) -> None:
     """Отправить ответ в Telegram с fallback-обработкой ошибок."""
+    message = _telegram_message(update)
+    if message is None:
+        log.warning("Cannot send Telegram reply: update has no message")
+        return
+
     settings = get_settings()
     max_len = settings.telegram.message_max_length
 
@@ -199,7 +220,7 @@ async def _send_telegram_reply(
         if len(caption) > caption_max:
             caption = caption[:caption_max] + "... (сокращено)"
         try:
-            await update.message.reply_photo(
+            await message.reply_photo(
                 photo=photo.data,
                 caption=caption,
                 parse_mode="HTML",
@@ -207,27 +228,27 @@ async def _send_telegram_reply(
             )
         except BadRequest as e:
             log.warning("Telegram BadRequest при отправке photo: %s", e)
-            await update.message.reply_photo(photo=photo.data, reply_markup=reply_markup)
+            await message.reply_photo(photo=photo.data, reply_markup=reply_markup)
         if len(text) > caption_max:
             remainder = text[caption_max:]
             if len(remainder) > max_len:
                 remainder = remainder[:max_len] + "... (сообщение сокращено)"
             try:
-                await update.message.reply_text(remainder, parse_mode="HTML")
+                await message.reply_text(remainder, parse_mode="HTML")
             except BadRequest:
                 plain = re.sub(r"<[^>]+>", "", remainder)
-                await update.message.reply_text(plain)
+                await message.reply_text(plain)
         return
 
     try:
-        await update.message.reply_text(text, parse_mode="HTML", reply_markup=reply_markup)
+        await message.reply_text(text, parse_mode="HTML", reply_markup=reply_markup)
     except BadRequest as e:
         log.warning("Telegram BadRequest при HTML-отправке: %s. Отправляю plain text.", e)
         try:
             plain = re.sub(r"<[^>]+>", "", text)
             if len(plain) > max_len:
                 plain = plain[:max_len] + "... (сообщение сокращено)"
-            await update.message.reply_text(plain, reply_markup=reply_markup)
+            await message.reply_text(plain, reply_markup=reply_markup)
         except Exception:
             log.error("Telegram не удалось отправить даже plain text")
     except TimedOut:
@@ -237,7 +258,7 @@ async def _send_telegram_reply(
             log.warning("Telegram reply_text TimedOut, retry %d/%d", attempt + 1, tg_settings.retry_count)
             await asyncio.sleep(tg_settings.retry_delay)
             try:
-                await update.message.reply_text(text, parse_mode="HTML", reply_markup=reply_markup)
+                await message.reply_text(text, parse_mode="HTML", reply_markup=reply_markup)
                 sent = True
                 break
             except TimedOut:
@@ -255,6 +276,10 @@ async def _send_telegram_reply(
 
 async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Команда /start."""
+    message = _telegram_message(update)
+    if message is None:
+        return
+
     agents = _chat_mgr.agents if _chat_mgr else {}
     agent_names = ", ".join(agents.keys()) or "(нет)"
     lines = [
@@ -270,19 +295,24 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/tokens — расход токенов текущей сессии",
         "/clear — очистить историю диалога",
         "/history — статистика истории",
+        "/analyze — анализ объектов метаданных (без OData-запроса)",
     ]
-    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+    await message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
 async def handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Команда /status — показать статус всех агентов."""
+    message = _telegram_message(update)
+    if message is None:
+        return
+
     if not _chat_mgr:
-        await update.message.reply_text("⚠️ ChatManager не инициализирован.")
+        await message.reply_text("⚠️ ChatManager не инициализирован.")
         return
 
     agents = _chat_mgr.agents
     if not agents:
-        await update.message.reply_text("⚠️ Нет подключённых агентов.")
+        await message.reply_text("⚠️ Нет подключённых агентов.")
         return
 
     lines = ["📊 <b>Статус агентов</b>\n"]
@@ -295,29 +325,45 @@ async def handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 lines.append(f"   {k}: <code>{v}</code>")
         lines.append("")
 
-    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+    await message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
 async def handle_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Команда /clear — очистить историю диалога."""
-    if not _chat_mgr:
-        await update.message.reply_text("⚠️ ChatManager не инициализирован.")
+    message = _telegram_message(update)
+    if message is None:
         return
 
-    chat_id = update.effective_chat.id
-    chat = _chat_mgr.get_or_create(chat_id)
-    chat.clear()
+    if not _chat_mgr:
+        await message.reply_text("⚠️ ChatManager не инициализирован.")
+        return
 
-    await update.message.reply_text("🗑 История диалога очищена.")
+    chat = update.effective_chat
+    if chat is None:
+        return
+
+    chat_id = chat.id
+    chat_obj = _chat_mgr.get_or_create(chat_id)
+    chat_obj.clear()
+
+    await message.reply_text("🗑 История диалога очищена.")
 
 
 async def handle_history_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Команда /history — показать статистику истории."""
-    if not _chat_mgr:
-        await update.message.reply_text("⚠️ ChatManager не инициализирован.")
+    message = _telegram_message(update)
+    if message is None:
         return
 
-    chat_id = update.effective_chat.id
+    if not _chat_mgr:
+        await message.reply_text("⚠️ ChatManager не инициализирован.")
+        return
+
+    chat = update.effective_chat
+    if chat is None:
+        return
+
+    chat_id = chat.id
     history_mgr = _chat_mgr.history_mgr
     history = history_mgr.get(chat_id)
     total_chats = history_mgr.chat_count()
@@ -334,31 +380,47 @@ async def handle_history_stats(update: Update, context: ContextTypes.DEFAULT_TYP
         f"Обрезка до: {history_mgr.trim_to}",
         f"Персистентность: {'✅ да' if history_mgr.is_persistent else '❌ нет'}",
     ]
-    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+    await message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
 async def handle_metrics(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Команда /metrics — показать метрики производительности и AI-usage."""
+    message = _telegram_message(update)
+    if message is None:
+        return
+
     report = app_metrics.format_report()
-    await update.message.reply_text(report, parse_mode="HTML")
+    await message.reply_text(report, parse_mode="HTML")
 
 
 async def handle_tokens(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Команда /tokens — показать расход токенов текущей сессии."""
-    chat_id = update.effective_chat.id
+    message = _telegram_message(update)
+    if message is None:
+        return
+
+    chat = update.effective_chat
+    if chat is None:
+        return
+
+    chat_id = chat.id
     report = session_tokens.format_session_report(chat_id)
-    await update.message.reply_text(report, parse_mode="HTML")
+    await message.reply_text(report, parse_mode="HTML")
 
 
 async def handle_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Команда /refresh — обновить данные всех агентов."""
+    message = _telegram_message(update)
+    if message is None:
+        return
+
     if not _chat_mgr:
-        await update.message.reply_text("⚠️ ChatManager не инициализирован.")
+        await message.reply_text("⚠️ ChatManager не инициализирован.")
         return
 
     agents = _chat_mgr.agents
     if not agents:
-        await update.message.reply_text("⚠️ Нет подключённых агентов.")
+        await message.reply_text("⚠️ Нет подключённых агентов.")
         return
 
     results: list[str] = []
@@ -369,45 +431,90 @@ async def handle_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         except Exception as e:
             results.append(f"❌ {name}: {e}")
 
-    await update.message.reply_text(
+    await message.reply_text(
         "🔄 <b>Обновление агентов</b>\n\n" + "\n".join(results),
         parse_mode="HTML",
     )
 
 
+async def handle_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Команда /analyze — standalone анализ метаданных."""
+    message = _telegram_message(update)
+    if message is None:
+        return
+
+    if not _chat_mgr:
+        await message.reply_text("⚠️ ChatManager не инициализирован.")
+        return
+
+    question = " ".join(context.args) if context.args else ""
+    if not question.strip():
+        await message.reply_text(
+            "Использование: <code>/analyze ваш вопрос</code>\n"
+            "Пример: <code>/analyze Сколько дней отпуска осталось у сотрудников?</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    if "analyst" not in _chat_mgr.agents:
+        await message.reply_text("⚠️ Агент analyst не настроен в env.json.")
+        return
+
+    chat = update.effective_chat
+    if chat is None:
+        return
+
+    chat_id = chat.id
+    chat_obj = _chat_mgr.get_or_create(chat_id)
+
+    try:
+        response = await chat_obj.process_analyze(question.strip())
+    except Exception as e:
+        log.exception("Analyze error in chat %s", chat_id)
+        await message.reply_text(f"⚠️ Ошибка анализа: {e}")
+        return
+
+    await _send_telegram_reply(update, response.text, response.reply_markup, attachments=response.attachments)
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработка текстового сообщения — маршрутизация через ChatManager."""
-    if not update.message or not update.message.text:
+    message = _telegram_message(update)
+    if message is None or not message.text:
         return
 
     if not _chat_mgr:
         log.error("ChatManager не инициализирован")
-        await update.message.reply_text("⚠️ Внутренняя ошибка: бот не готов.")
+        await message.reply_text("⚠️ Внутренняя ошибка: бот не готов.")
         return
 
-    user_text = update.message.text.strip()
-    chat_id = update.effective_chat.id
+    user_text = message.text.strip()
+    chat = update.effective_chat
+    if chat is None:
+        return
 
-    chat = _chat_mgr.get_or_create(chat_id)
+    chat_id = chat.id
+
+    chat_obj = _chat_mgr.get_or_create(chat_id)
 
     # Обработка через Chat (пайплайн: агент → форматирование → обрезка → пагинация)
     try:
-        response = await chat.process_message(user_text)
+        response = await chat_obj.process_message(user_text)
     except ODataError as e:
         log.error("OData error in chat %s: %s", chat_id, e)
-        await update.message.reply_text(f"⚠️ Ошибка OData: {e}")
+        await message.reply_text(f"⚠️ Ошибка OData: {e}")
         return
     except AIError as e:
         log.error("AI error in chat %s: %s", chat_id, e)
-        await update.message.reply_text(f"⚠️ Ошибка AI: {e}")
+        await message.reply_text(f"⚠️ Ошибка AI: {e}")
         return
     except ODataSkillError as e:
         log.error("Internal error in chat %s: %s", chat_id, e)
-        await update.message.reply_text(f"⚠️ Внутренняя ошибка: {e}")
+        await message.reply_text(f"⚠️ Внутренняя ошибка: {e}")
         return
     except Exception as e:
         log.exception("Unexpected error in chat %s", chat_id)
-        await update.message.reply_text(f"⚠️ Непредвиденная ошибка: {e}")
+        await message.reply_text(f"⚠️ Непредвиденная ошибка: {e}")
         return
 
     # Только отправка в Telegram (transport layer)
@@ -422,6 +529,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def handle_pagination_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработка inline-кнопок пагинации (callback query)."""
     query = update.callback_query
+    if query is None:
+        return
+
     await query.answer()
 
     # Мгновенная обратная связь — показать «Загрузка»
@@ -434,7 +544,11 @@ async def handle_pagination_callback(update: Update, context: ContextTypes.DEFAU
         await query.edit_message_text("⚠️ ChatManager не инициализирован.")
         return
 
-    chat_id = update.effective_chat.id
+    chat = update.effective_chat
+    if chat is None:
+        return
+
+    chat_id = chat.id
     data = query.data or ""
 
     # Разбор callback_data: "page:<skip>"
@@ -449,9 +563,9 @@ async def handle_pagination_callback(update: Update, context: ContextTypes.DEFAU
         return
 
     # Обработка через Chat (тот же пайплайн, что и для обычного сообщения)
-    chat = _chat_mgr.get_or_create(chat_id)
+    chat_obj = _chat_mgr.get_or_create(chat_id)
     try:
-        response = await chat.process_pagination(skip)
+        response = await chat_obj.process_pagination(skip)
     except PaginationError as e:
         await query.edit_message_text(f"⚠️ {e}")
         return
@@ -464,10 +578,12 @@ async def handle_pagination_callback(update: Update, context: ContextTypes.DEFAU
         await query.edit_message_text(response.text, parse_mode="HTML", reply_markup=response.reply_markup)
     except BadRequest as e:
         log.warning("Pagination edit BadRequest: %s. Sending new message.", e)
-        try:
-            await query.message.reply_text(response.text, parse_mode="HTML", reply_markup=response.reply_markup)
-        except Exception:
-            log.error("Pagination: не удалось отправить сообщение")
+        callback_message = query.message
+        if isinstance(callback_message, Message):
+            try:
+                await callback_message.reply_text(response.text, parse_mode="HTML", reply_markup=response.reply_markup)
+            except Exception:
+                log.error("Pagination: не удалось отправить сообщение")
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -476,7 +592,14 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     if isinstance(update, Update):
         if update.effective_chat:
             extra["chat_id"] = update.effective_chat.id
-        extra["update_type"] = update.update_type
+        if update.message:
+            extra["update_type"] = "message"
+        elif update.callback_query:
+            extra["update_type"] = "callback_query"
+        elif update.edited_message:
+            extra["update_type"] = "edited_message"
+        else:
+            extra["update_type"] = "other"
     log.error("PTB error: %s", error, extra=extra, exc_info=error)
 
 
@@ -590,6 +713,7 @@ def main() -> None:
     app.add_handler(CommandHandler("clear", handle_clear))
     app.add_handler(CommandHandler("tokens", handle_tokens))
     app.add_handler(CommandHandler("history", handle_history_stats))
+    app.add_handler(CommandHandler("analyze", handle_analyze))
     app.add_handler(CallbackQueryHandler(handle_pagination_callback, pattern=r"^page:\d+$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(error_handler)

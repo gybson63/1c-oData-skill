@@ -113,8 +113,11 @@ class BaseAgent:
 
 ```
 main() → post_init() → init_agents()
+         ├─ AGENT_REGISTRY["analyst"] → AnalystAgent()  (опционально)
+         │   └─ MCP conf-doc → MetadataBrief
          ├─ AGENT_REGISTRY["odata"] → ODataAgent()
          │   ├─ initialize(): AI client, MCP, $metadata cache
+         │   ├─ Analyst pre-step (если analyst.preprocessor_for_odata)
          │   └─ готов к обработке
          └─ FormatterAgent (авто-создаётся если не задан явно)
 
@@ -122,6 +125,14 @@ shutdown() → post_shutdown() → shutdown_agents()
              ├─ agent.shutdown() для каждого
              └─ MCP disconnect_all()
 ```
+
+### AnalystAgent
+
+Агент-аналитик метаданных. Определяет объекты конфигурации для OData через MCP `conf_doc_*` и profile MD (`skills/analyst/profiles/`).
+
+- Standalone: `/analyze`, `[analyze]`
+- Pre-step: результат вставляется в OData Step 1 как блок «АНАЛИЗ МЕТАДАННЫХ»
+- Выход: `MetadataBrief` (intent, primary/secondary objects, avoid)
 
 ### ODataAgent
 
@@ -261,6 +272,50 @@ JSON analytics → параллельные OData-запросы → pandas Data
 
 Model Context Protocol — открытый протокол для подключения внешних инструментов к AI-агентам. В проекте используется для **расширения возможностей агента** за счёт внешних серверов.
 
+### Два MCP-сервера: OData + conf-doc
+
+```
+Cursor / Bot
+    ├─ 1c-odata (stdio)     → fetch, fetch_table, analyze_data → 1С OData REST
+    └─ 1c-conf-doc (stdio)  → conf_doc_search, conf_doc_get_object, …
+                                    ↓
+                              HTTP API :8050 (1c-conf-doc backend)
+                                    ↓
+                              SQLite + FAISS (метаданные из XML-выгрузки)
+```
+
+**Workflow:** conf-doc уточняет структуру метаданных (реквизиты, типы, синонимы) → OData получает фактические данные.
+
+### conf-doc в Telegram-боте
+
+Бот обогащает Step 1 промпт через HTTP-клиент (`bot_lib/conf_doc_client.py`), не дожидаясь MCP tool calls:
+
+```
+env.json → agents.odata.conf_doc
+                │
+                ▼
+      fetch_conf_doc_context()  — POST /search
+                │
+                ▼
+      ODataPipeline.build_step1_prompt()  — блок «КОНТЕКСТ ИЗ ДОКУМЕНТАЦИИ»
+```
+
+Настройки: `enabled`, `api_url`, `configuration`, `enrich_prompt`, `search_top_k`. При недоступности API pipeline продолжает работу с `$metadata` (fallback).
+
+### Shared + per-agent MCP
+
+```json
+{
+  "mcp_servers": { "conf-doc": { "...": "shared" } },
+  "agents": {
+    "analyst": { "mcp_inherit": true, "mcp_servers": { "web-search": { "enabled": false } } },
+    "odata": { "mcp_inherit": true, "mcp_servers": { "odata": { "...": "..." } } }
+  }
+}
+```
+
+Merge: `bot/mcp_config.resolve_mcp_config(profile, agent)`. Каждый агент — свой `MCPClientManager`.
+
 ### Архитектура MCP-подключения
 
 ```
@@ -339,7 +394,7 @@ class MCPClientManager:
 
 ### MCP-сервер odata_server.py
 
-Единственный инструмент `fetch(url)` — универсальный HTTP-клиент для OData:
+Инструменты `fetch`, `fetch_table`, `analyze_data` — HTTP-клиент для OData:
 
 ```
 fetch(url="/odata/standard.odata/Catalog_Организации?$top=5")
@@ -356,15 +411,18 @@ fetch(url="/odata/standard.odata/Catalog_Организации?$top=5")
 
 ```
 skills/
+├── analyst/              # Аналитик метаданных + profiles/
+├── analyst-conf-doc/
+├── analyst-domain/
+├── analyst-mcp/
 ├── odata/
-│   └── SKILL.md         # Справочник OData-запросов
-│                         # Entity prefixes, field suffixes,
-│                         # $filter operators, примеры
-│
+│   └── SKILL.md
+├── conf-doc/
+│   └── SKILL.md
 └── 1cconfinfo/
-    ├── SKILL.md         # Документация по анализу конфигурации
+    ├── SKILL.md
     └── scripts/
-        └── odata-cfg-info.py  # CLI-утилита анализа $metadata
+        └── odata-cfg-info.py
 ```
 
 ### Как используются Skills

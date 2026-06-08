@@ -148,7 +148,7 @@ python -m bot --env-file env.json --profile default --log-level DEBUG
 
 ### Через MCP (рекомендуется)
 
-Скилл использует MCP-инструмент **`fetch`**. Настройте MCP-сервер в конфигурации вашего агента (Cline, Claude Desktop, VS Code, Cursor):
+Скилл использует MCP-инструмент **`fetch`**. Для точных запросов подключите также **1c-conf-doc** (семантический поиск по метаданным конфигурации). Шаблон: [`mcp.example.json`](mcp.example.json), рабочий конфиг Cursor: [`.cursor/mcp.json`](.cursor/mcp.json).
 
 ```json
 {
@@ -161,10 +161,20 @@ python -m bot --env-file env.json --profile default --log-level DEBUG
         "ODATA_USER": "Администратор",
         "ODATA_PASSWORD": "пароль"
       }
+    },
+    "1c-conf-doc": {
+      "command": "C:\\ПервыйБИТ\\ИИ\\1c-conf-doc\\.venv\\Scripts\\python.exe",
+      "args": ["-m", "onec_conf_doc.mcp"],
+      "env": {
+        "CONF_DOC_API_URL": "http://localhost:8050",
+        "CONF_DOC_CONFIGURATION": "ЗарплатаИУправлениеПерсоналомКОРП"
+      }
     }
   }
 }
 ```
+
+Workflow: `conf_doc_search` → уточнение реквизитов → `fetch` к OData. См. [`skills/conf-doc/SKILL.md`](skills/conf-doc/SKILL.md).
 
 Или через внешний `@modelcontextprotocol/server-fetch`:
 
@@ -251,9 +261,17 @@ powershell.exe -NoProfile -File .claude/skills/epf-build/scripts/epf-build.ps1 `
 
 ---
 
-## MCP-сервер для 1С OData
+## MCP-серверы
 
-Собственный MCP-сервер ([`mcp_servers/odata_server.py`](mcp_servers/odata_server.py)) для выполнения HTTP-запросов к 1С OData API с автоматической Basic-авторизацией. Поддерживает GET, POST, PATCH, DELETE. Запускается через stdio-транспорт.
+### 1c-odata
+
+Собственный MCP-сервер ([`mcp_servers/odata_server.py`](mcp_servers/odata_server.py)) для HTTP-запросов к 1С OData API с Basic-авторизацией. Инструменты: `fetch`, `fetch_table`, `analyze_data`. Транспорт: stdio.
+
+### 1c-conf-doc
+
+Внешний MCP из проекта [`1c-conf-doc`](C:\ПервыйБИТ\ИИ\1c-conf-doc): stdio-мост к HTTP API на `http://localhost:8050`. Инструменты: `conf_doc_search`, `conf_doc_get_object`, `conf_doc_get_object_chunk` и др. Индекс строится из XML-выгрузки конфигурации (Docker: `docker compose up -d` в 1c-conf-doc).
+
+Проверка backend: `curl http://localhost:8050/health`. Имя для `CONF_DOC_CONFIGURATION` — поле **`name`** из `/configurations` (как в метаданных, например `ЗарплатаИУправлениеПерсоналомКОРП`, не сокращение «ЗУП»).
 
 ---
 
@@ -263,7 +281,13 @@ powershell.exe -NoProfile -File .claude/skills/epf-build/scripts/epf-build.ps1 `
 |------|----------|
 | [`bot/README.md`](bot/README.md) | Архитектура бота, агенты, конфигурация |
 | [`skills/odata/SKILL.md`](skills/odata/SKILL.md) | OData-запросы: параметры, фильтры, примеры |
-| [`skills/1cconfinfo/SKILL.md`](skills/1cconfinfo/SKILL.md) | Анализ XML-выгрузки конфигурации 1С |
+| [`skills/conf-doc/SKILL.md`](skills/conf-doc/SKILL.md) | Семантический поиск по метаданным через MCP 1c-conf-doc |
+| [`skills/analyst/SKILL.md`](skills/analyst/SKILL.md) | Аналитик метаданных: MetadataBrief, /analyze |
+| [`skills/analyst-conf-doc/SKILL.md`](skills/analyst-conf-doc/SKILL.md) | conf-doc для аналитика |
+| [`skills/analyst-domain/SKILL.md`](skills/analyst-domain/SKILL.md) | Profile, decision trees |
+| [`skills/analyst-mcp/SKILL.md`](skills/analyst-mcp/SKILL.md) | MCP-инструменты аналитика |
+| [`docs/conf-doc-evaluation-checklist.md`](docs/conf-doc-evaluation-checklist.md) | Чеклист: оценка пользы conf-doc (10 вопросов ЗУП) |
+| [`skills/1cconfinfo/SKILL.md`](skills/1cconfinfo/SKILL.md) | Анализ структуры конфигурации 1С (conf-doc / XML / OData) |
 | [`docs/1c-value-tree-in-forms.md`](docs/1c-value-tree-in-forms.md) | Деревья значений в управляемых формах 1С |
 | [`docs/user-guide.md`](docs/user-guide.md) | Руководство пользователя (не-IT) |
 | [`docs/full-guide.md`](docs/full-guide.md) | Полное техническое руководство |

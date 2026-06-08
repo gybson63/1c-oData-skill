@@ -85,12 +85,14 @@ class Chat:
     def __init__(
         self,
         chat_id: int,
-        agent: BaseAgent,
+        agents: dict[str, BaseAgent],
+        default_agent: BaseAgent,
         formatter: FormatterAgent | None,
         history_mgr: HistoryManager,
     ) -> None:
         self.chat_id = chat_id
-        self._agent = agent
+        self._agents = agents
+        self._default_agent = default_agent
         self._formatter = formatter
         self._history_mgr = history_mgr
 
@@ -123,6 +125,54 @@ class Chat:
         """Сбросить контекст пагинации."""
         self._pagination_ctx = None
 
+    @staticmethod
+    def _is_analyze_intent(text: str) -> bool:
+        low = text.lower()
+        markers = (
+            "какие объекты метаданных",
+            "какой объект метаданных",
+            "разбери метаданные",
+            "где хранятся данные",
+        )
+        return any(m in low for m in markers)
+
+    def _resolve_agent_and_text(
+        self,
+        user_text: str,
+        *,
+        agent_name: str | None = None,
+    ) -> tuple[BaseAgent, str]:
+        if agent_name:
+            agent = self._agents.get(agent_name) or self._default_agent
+            return agent, user_text.strip()
+
+        text = user_text.strip()
+        if text.lower().startswith("[analyze]"):
+            query = text[9:].strip()
+            agent = self._agents.get("analyst") or self._default_agent
+            return agent, query or text
+
+        if self._is_analyze_intent(text):
+            agent = self._agents.get("analyst") or self._default_agent
+            return agent, text
+
+        return self._default_agent, text
+
+    async def _run_agent(
+        self,
+        user_text: str,
+        *,
+        chat_id: int | None = None,
+        agent_name: str | None = None,
+    ) -> AgentProcessResult:
+        history = self._history_mgr.get(chat_id if chat_id is not None else self.chat_id)
+        agent, query_text = self._resolve_agent_and_text(user_text, agent_name=agent_name)
+        return await agent.process_message(
+            query_text,
+            history,
+            chat_id=chat_id if chat_id is not None else self.chat_id,
+        )
+
     # -- core processing -----------------------------------------------------
 
     async def process_inbound(self, inbound: InboundMessage) -> OutboundMessage:
@@ -143,11 +193,7 @@ class Chat:
                 )
             format_question = inbound.text
 
-        agent_result = await self._agent.process_message(
-            user_text,
-            history,
-            chat_id=chat_id,
-        )
+        agent_result = await self._run_agent(user_text, chat_id=chat_id)
         self.save_history(agent_result.history)
         raw_answer = agent_result.text
 
@@ -221,6 +267,18 @@ class Chat:
         )
         return outbound
 
+    async def process_analyze(self, user_text: str) -> ChatResponse:
+        """Standalone анализ метаданных через AnalystAgent."""
+        agent_result = await self._run_agent(user_text, chat_id=self.chat_id, agent_name="analyst")
+        self.save_history(agent_result.history)
+        response = self._finalize(
+            agent_result.text,
+            pagination_ctx=None,
+            raw_answer=agent_result.text,
+            attachments=agent_result.attachments,
+        )
+        return response
+
     async def process_message(self, user_text: str) -> ChatResponse:
         """Полный пайплайн обработки сообщения.
 
@@ -239,14 +297,7 @@ class Chat:
         Raises:
             ODataSkillError, AIError, ODataError — пробрасываются из агента.
         """
-        history = self.history
-
-        # Шаг 1: обработка агентом
-        agent_result = await self._agent.process_message(
-            user_text,
-            history,
-            chat_id=self.chat_id,
-        )
+        agent_result = await self._run_agent(user_text, chat_id=self.chat_id)
 
         # Сохранить историю
         self.save_history(agent_result.history)
@@ -295,8 +346,8 @@ class Chat:
         if not ctx:
             raise PaginationError("Контекст запроса потерян. Повторите запрос.")
 
-        agent = self._agent
-        if not hasattr(agent, "execute_page_with_ctx"):
+        agent = self._agents.get("odata") or self._default_agent
+        if not agent or not hasattr(agent, "execute_page_with_ctx"):
             raise PaginationError("Агент OData не доступен.")
 
         answer, new_ctx = await agent.execute_page_with_ctx(ctx, skip, chat_id=self.chat_id)
@@ -434,7 +485,7 @@ class Chat:
         chat_id: int,
     ) -> str:
         """Загрузить все страницы OData для email-ответа."""
-        agent = self._agent
+        agent = self._agents.get("odata") or self._default_agent
         fetch_all = cast(
             Callable[..., Awaitable[str]] | None,
             getattr(agent, "execute_all_pages_with_ctx", None),
@@ -576,7 +627,8 @@ class ChatManager:
                 raise RuntimeError("Нет доступных агентов для обработки запроса")
             self._chats[chat_id] = Chat(
                 chat_id=chat_id,
-                agent=agent,
+                agents=self._agents,
+                default_agent=agent,
                 formatter=self._formatter,
                 history_mgr=self._history_mgr,
             )
