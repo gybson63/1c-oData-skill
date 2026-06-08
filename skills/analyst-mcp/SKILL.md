@@ -7,6 +7,8 @@ description: >-
 
 # analyst-mcp — MCP для аналитика
 
+> Человеческая документация (Docker, отладка, gating): [`docs/searxng.md`](../../docs/searxng.md). Конфиг env.json: [`docs/configuration.md`](../../docs/configuration.md).
+
 ## Конфигурация (бот)
 
 ```json
@@ -44,36 +46,16 @@ Merge: `{...profile.mcp_servers, ...agent.mcp_servers}`. `enabled: false` — п
 | **searxng** | Только после conf_doc + profile; не хватает имён реквизитов / OData-поведения | `searxng_web_search`, `web_url_read` |
 | **document-reader** | Книги/PDF по 1С (future) | filesystem MCP |
 
-## SearXNG: требования
+## SearXNG
 
-### Быстрый старт (Docker)
-
-```bash
-docker compose -f docker-compose.searxng.yml up -d
-python scripts/enable_searxng_mcp.py   # включить в env.json (один раз)
-python scripts/test_searxng_mcp.py     # проверка MCP
-```
-
-Конфиг SearXNG: `docker/searxng/settings.yml` (JSON-формат уже включён).
-
-### Компоненты
-
-1. Запущенный экземпляр SearXNG с JSON-форматом в `settings.yml`:
-   ```yaml
-   search:
-     formats:
-       - html
-       - json
-   ```
-2. `SEARXNG_URL` — URL инстанса (например `http://localhost:8080`).
-3. Пакет `mcp-searxng` через `npx -y mcp-searxng` (Node.js).
-
-### Инструменты SearXNG
+Fallback после conf-doc + profile. **Gating:** не вызывать до `conf_doc_search`.
 
 | Tool | Назначение |
 |------|------------|
-| `searxng_web_search` | Поиск по вебу (`query`, опционально `pageno`, `time_range`, `language`) |
-| `web_url_read` | Чтение страницы в markdown (`url`, опционально `maxLength`, `section`) |
+| `searxng_web_search` | Поиск по вебу |
+| `web_url_read` | Чтение страницы в markdown |
+
+Установка, Docker, MCP в Cursor, отладка 403: **[`docs/searxng.md`](../../docs/searxng.md)**.
 
 ## Cursor IDE
 
@@ -99,4 +81,4 @@ Native tool `submit_metadata_brief` — всегда доступен для ф�
 
 HTTP fallback: `conf_doc_fallback` в env.json при недоступности MCP conf-doc.
 
-Если SearXNG возвращает 403 — проверь `formats: [html, json]` в settings.yml.
+SearXNG 403 и smoke-test: [`docs/searxng.md`](../../docs/searxng.md).

@@ -67,50 +67,9 @@ bot/
 
 ## Конфигурация (env.json)
 
-```json
-{
-  "profiles": {
-    "default": {
-      "telegram_token": "...",
-      "ai_api_key": "...",
-      "ai_base_url": "https://api.openai.com/v1",
-      "ai_model": "gpt-4o-mini",
-      "ai_rpm": 20,
+Полная схема профиля, агентов, MCP и pricing: **[`docs/configuration.md`](../docs/configuration.md)**.
 
-      "agents": {
-        "odata": {
-          "type": "odata",
-          "odata_url": "http://host/base/odata/standard.odata",
-          "odata_user": "Администратор",
-          "odata_password": "пароль",
-          "conf_doc": {
-            "enabled": true,
-            "api_url": "http://localhost:8050",
-            "configuration": "ЗарплатаИУправлениеПерсоналомКОРП",
-            "enrich_prompt": true,
-            "search_top_k": 5
-          },
-          "mcp_servers": {
-            "odata": {
-              "command": "python",
-              "args": ["mcp_servers/odata_server.py"],
-              "env": { ... }
-            },
-            "conf-doc": {
-              "command": "C:\\ПервыйБИТ\\ИИ\\1c-conf-doc\\.venv\\Scripts\\python.exe",
-              "args": ["-m", "onec_conf_doc.mcp"],
-              "env": {
-                "CONF_DOC_API_URL": "http://localhost:8050",
-                "CONF_DOC_CONFIGURATION": "ЗарплатаИУправлениеПерсоналомКОРП"
-              }
-            }
-          }
-        }
-      }
-    }
-  }
-}
-```
+Кратко: `cp env.example.json env.json`, заполните `telegram_token`, `ai_*`, `agents.odata.odata_*`, при необходимости `mcp_servers.conf-doc`.
 
 ### AnalystAgent (анализ метаданных)
 
@@ -121,7 +80,9 @@ bot/
 | Standalone | `/analyze <вопрос>` в Telegram, префикс `[analyze]` в email |
 | Pre-step | `preprocessor_for_odata: true` — блок «АНАЛИЗ МЕТАДАННЫХ» в OData Step 1 |
 
-**MCP:** shared серверы в `profiles.default.mcp_servers`, per-agent в `agents.analyst.mcp_servers` (merge через `bot/mcp_config.py`). Опционально `searxng` (`mcp-searxng`) для веб-поиска внешней документации 1С.
+**MCP:** shared серверы в `profiles.default.mcp_servers`, per-agent в `agents.analyst.mcp_servers` (merge через `bot/mcp_config.py`).
+
+**SearXNG** (веб-поиск после conf-doc): **[`docs/searxng.md`](../docs/searxng.md)**.
 
 ### conf-doc (обогащение Step 1)
 
@@ -204,15 +165,22 @@ print(f"Total: ${analyzer.total_cost():.4f}")
 
 ## Запуск
 
+См. [`docs/getting-started.md`](../docs/getting-started.md).
+
 ```bash
 python -m bot
-# с параметрами:
 python -m bot --env-file env.json --profile default --log-level DEBUG
 ```
+
+## Email-интерфейс
+
+Опциональный IMAP/SMTP (`email.enabled: true` в env.json). Префикс `[analyze]` для аналитика. Тестирование: [`docs/email-testing.md`](../docs/email-testing.md).
 
 ## Команды Telegram
 
 - `/start` — приветствие, список агентов
 - `/status` — статус всех агентов
-- `/refresh` — обновить данные агентов (метаданные 1С)
-- Любой текст → маршрутизация агенту по умолчанию (odata)
+- `/refresh` — обновить метаданные 1С
+- `/tokens` — отчёт по токенам и стоимости сессии
+- `/analyze <вопрос>` — аналитик метаданных (MetadataBrief)
+- Любой текст → маршрутизация агенту (по умолчанию — odata)

@@ -1,5 +1,7 @@
 # Полное руководство: 1cconfinfo + OData
 
+> MCP для Cursor: [`mcp-setup.md`](mcp-setup.md). SearXNG для аналитика: [`searxng.md`](searxng.md).
+
 Руководство описывает, как использовать скиллы `1cconfinfo` и `odata` совместно
 для анализа структуры конфигурации 1С и получения данных через OData.
 
