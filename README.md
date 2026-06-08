@@ -292,6 +292,30 @@ powershell.exe -NoProfile -File .claude/skills/epf-build/scripts/epf-build.ps1 `
 | [`docs/user-guide.md`](docs/user-guide.md) | Руководство пользователя (не-IT) |
 | [`docs/full-guide.md`](docs/full-guide.md) | Полное техническое руководство |
 | [`processing/README.md`](processing/README.md) | Описание обработки EnableODataInterface |
+| [`CHANGELOG.md`](CHANGELOG.md) | История изменений (Keep a Changelog) |
+
+---
+
+## Разработка
+
+Базовая ветка — **`main`**. Ветка `master` не используется.
+
+1. Feature-ветка от `main`: `feature/...`, `fix/...`, `docs/...`, `chore/...`.
+2. Перед коммитом: `ruff check .`, `ruff format .`, `mypy bot/ bot_lib/ mcp_servers/`.
+3. Обновляйте [`CHANGELOG.md`](CHANGELOG.md), секция `[Unreleased]`.
+4. Коммиты — [Conventional Commits](https://www.conventionalcommits.org/ru/) (`feat:`, `fix:`, …).
+5. Merge только через **Pull Request** в `main`.
+6. Релизы — SemVer, `python scripts/release.py prepare X.Y.Z`, тег `vX.Y.Z` → GitHub Release.
+
+Установка dev-окружения и hooks:
+
+```bash
+pip install -e ".[dev]"
+pre-commit install
+pre-commit install --hook-type commit-msg
+```
+
+Подробные правила — в `.cursor/rules/development-workflow.mdc`.
 
 ---
 
