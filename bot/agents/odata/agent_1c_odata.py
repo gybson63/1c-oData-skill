@@ -232,36 +232,19 @@ class ODataAgent(BaseAgent):
     ) -> tuple[str, dict[str, Any] | None]:
         """Выполнить запрос пагинации с явно переданным контекстом.
 
-        Не проходит через AI Step 1 — использует сохранённый контекст запроса.
-        Проходит через AI Step 2 для форматирования.
-        """
-        if not self._executor or not self._ai_service:
-            raise RuntimeError("ODataAgent не инициализирован")
-
-        answer, new_ctx = await self.execute_page_with_ctx(ctx, skip)
-
-        # Обновить внутренний контекст пагинации
-        if new_ctx:
-            self._pagination_states[chat_id] = new_ctx
-
-        return answer, new_ctx
-
-    async def execute_page_with_ctx(
-        self,
-        ctx: dict[str, Any],
-        skip: int,
-    ) -> tuple[str, dict[str, Any | None]]:
-        """Выполнить запрос пагинации с явно переданным контекстом.
-
         Не зависит от chat_id — контекст пагинации управляется извне (через Chat).
 
         Args:
             ctx: контекст пагинации (entity, filter, select, ...).
             skip: значение $skip.
+            chat_id: ID чата (передаётся в Step 2 для метрик).
 
         Returns:
             Кортеж (answer_html, pagination_context или None).
         """
+        if not self._executor or not self._ai_service:
+            raise RuntimeError("ODataAgent не инициализирован")
+
         entity = ctx["entity"]
         filter_expr = ctx.get("filter")
         select = ctx.get("select")
