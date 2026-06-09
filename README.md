@@ -1,6 +1,6 @@
 Публикация на ![Infostart](https://infostart.ru/bitrix/templates/sandbox_empty/assets/tpl/abo/img/logo.svg) https://infostart.ru/1c/articles/2686030
 
-# 1c-oData-skill
+# 1c oData bot
 
 Работа с 1С:Предприятие через стандартный OData: скиллы для AI-агентов, Telegram- и email-бот с мультиагентной архитектурой, обработка публикации объектов в OData.
 
