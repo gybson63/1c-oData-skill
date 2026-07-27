@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - `build_global_config`: передача `profile_config` для наследования shared MCP (conf-doc).
+- Форматирование code blocks в `bot/README.md`, `docs/architecture.md`, `docs/ci-cd.md` под `ruff format` (CI).
 
 ### Removed
 

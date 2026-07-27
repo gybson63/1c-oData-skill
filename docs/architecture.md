@@ -485,13 +485,13 @@ env.json
 
 ```python
 class AppSettings(BaseModel):
-    ai: AISettings              # API-ключ, модель, RPM, температура
-    bot: BotSettings            # Telegram-токен
+    ai: AISettings  # API-ключ, модель, RPM, температура
+    bot: BotSettings  # Telegram-токен
     telegram: TelegramTransportSettings  # таймауты, ретраи
-    odata_query: ODataQuerySettings     # лимиты запросов
-    formatter: FormatterSettings        # модель форматтера
-    history: HistorySettings            # история диалогов
-    ai_pricing: PricingSettings         # цены за токены (per-model)
+    odata_query: ODataQuerySettings  # лимиты запросов
+    formatter: FormatterSettings  # модель форматтера
+    history: HistorySettings  # история диалогов
+    ai_pricing: PricingSettings  # цены за токены (per-model)
 ```
 
 **Singleton-паттерн**: `load_settings()` создаёт глобальный экземпляр, `get_settings()` возвращает его из любого модуля.
@@ -730,9 +730,9 @@ services:
 
 ```python
 class HistoryManager:
-    max_messages: int     # абсолютный максимум (default: 100)
-    trim_to: int          # обрезка до (default: 60)
-    persist_dir: str|None # директория для персистентности (опционально)
+    max_messages: int  # абсолютный максимум (default: 100)
+    trim_to: int  # обрезка до (default: 60)
+    persist_dir: str | None  # директория для персистентности (опционально)
 ```
 
 История обрезается автоматически при достижении `max_messages`, оставляя последние `trim_to` сообщений. Для AI-контекста используется `history_max_turns` (по умолчанию 10 пар = 20 сообщений).

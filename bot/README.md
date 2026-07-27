@@ -35,6 +35,7 @@ bot/
    ```python
    from ..base import BaseAgent
 
+
    class MyAgent(BaseAgent):
        name = "my_agent"
        # ... реализация методов
@@ -135,10 +136,11 @@ In-memory реестр метрик для мониторинга работы �
 async with track_time("odata_get_entities"):
     data = await client.get_entities(...)
 
+
 # Декоратор для синхронных функций:
 @track_sync("parse_metadata")
-def parse(xml):
-    ...
+def parse(xml): ...
+
 
 # AI-трекинг с расчётом стоимости:
 registry.track_ai_usage(
@@ -158,7 +160,7 @@ registry.track_ai_usage(
 **Агрегация затрат:**
 ```python
 analyzer = CostAnalyzer("logs/costs")
-print(analyzer.summary("day"))   # Дневная сводка
+print(analyzer.summary("day"))  # Дневная сводка
 print(analyzer.summary("hour"))  # Часовая сводка
 print(f"Total: ${analyzer.total_cost():.4f}")
 ```
