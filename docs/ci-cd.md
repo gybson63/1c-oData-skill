@@ -222,8 +222,7 @@ markers = [
 
 ```python
 @pytest.mark.slow
-def test_real_odata_request():
-    ...
+def test_real_odata_request(): ...
 ```
 
 Пропустить медленные:
